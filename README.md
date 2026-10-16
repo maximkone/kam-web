@@ -5,12 +5,14 @@ Chrono Divide does for Red Alert 2.
 
 - Engine approach: **TypeScript + WebGL2**, simulation ported from the AGPL-3.0 source of
   KaM Remake (`reyandme/kam_remake`), assets imported from the player's own KaM install.
-- Full plan: `docs/PLAN.md` · current spike contract: `docs/M0-SPIKE.md` · decision log: `docs/DECISIONS.md`.
+- Full plan: `docs/PLAN.md` · newest spec: `docs/M1-SPIKE.md` · decision log: `docs/DECISIONS.md`.
 
 ## Status
 
-**M0 — sprite pipeline spike** (in progress): decode the install's `.rxx` sprite packs into
-PNG atlases + JSON manifest, view them in a WebGL2 browser page.
+- **M0 — sprite pipeline: DONE** (accepted 2026-10-16). `.rxx` → PNG atlases + JSON manifest,
+  WebGL2 sprite viewer with pivot/mask/rotation-agnostic display. Proofs in the M0 commit body.
+- **M1 — map + terrain viewer** (in progress): parse real `.map` files, render terrain tiles
+  with corner heights, pan/zoom, tile HUD.
 
 ## Quickstart (Windows, Node >= 24)
 
@@ -18,19 +20,24 @@ PNG atlases + JSON manifest, view them in a WebGL2 browser page.
 # 1) Convert your own KaM Remake install (read-only!) into web atlases
 node tools/import/cli.ts --install "C:\Users\me\Desktop\KaM Remake" --check
 
-# 2) Serve the repo and open the viewer
-node apps/web/serve.ts           # http://127.0.0.1:8123/
+# 2) Export a map for the terrain viewer
+node tools/mapinfo/cli.ts "C:\Users\me\Desktop\KaM Remake\Tutorials\Town Tutorial\Town Tutorial.map" --export out/maps/TownTutorial.json
+
+# 3) Serve the repo and open the viewers
+node apps/web/serve.ts           # sprite viewer http://127.0.0.1:8123/ , map viewer /map.html
 ```
 
-Output lands in `out/atlas/` (gitignored — never committed).
+Output lands in `out/` (gitignored — never committed).
 
 ## Layout
 
 ```
-apps/web/          browser client (serve.ts, index.html, demo.ts)
+apps/web/          browser client (serve.ts, index.html + demo.ts sprite viewer, map.html + mapdemo.ts terrain viewer)
 packages/assets/   rxx decoder, PNG encoder, atlas packer
+packages/map/      .map parser (M1)
 tools/import/      CLI: install -> out/atlas
-docs/              PLAN.md (roadmap), M0-SPIKE.md (frozen spec), DECISIONS.md
+tools/mapinfo/     CLI: .map -> out/maps (M1)
+docs/              PLAN.md (roadmap), M0/M1 spike specs, DECISIONS.md
 _ref/kam_remake/   read-only reference clone of the AGPL source (gitignored)
 ```
 
