@@ -12,6 +12,12 @@ Unofficial **web port of KaM Remake** — playable in a browser, in the spirit o
    no halts just big dispatches of agents here and finish here").
 3. **Assets: player-supplied.** The importer reads the player's own KaM Remake install locally
    (File System Access API / CLI); we never redistribute TopWare art. Code is AGPL-3.0.
+4. **Owner priority (2026-10-16, verbatim):** "i see there just choosing items can u make it fully
+   workable and lan or internet we can add correctly and ill host it on some site" — build the
+   **full playable game**; add **LAN/internet multiplayer correctly** (the remake's own lockstep
+   design, on top of the deterministic sim the M2 harness already validates — not a bolt-on); keep
+   it **hostable**: static client bundle + one small relay process, and the player imports their
+   own assets in-browser, so a hosted copy carries no TopWare art.
 
 ## Why this is cheaper than Chrono Divide's road
 
@@ -34,7 +40,8 @@ tools/import/   install -> out/atlas (CLI now; in-browser importer later)
 ```
 
 Multiplayer model = the remake's own documented one: only commands travel; executed +10 ticks
-later; CRC per tick; mismatch → pause + resync.
+later; CRC per tick; mismatch → pause + resync. **LAN** = the relay run on the owner's machine;
+**internet** = the same relay on a host — one code path, so LAN and internet cannot drift apart.
 
 ## Milestones (proof bar per milestone — a claim counts only with its proof)
 
@@ -46,7 +53,8 @@ later; CRC per tick; mismatch → pause + resync.
   **replay-CRC parity harness** vs a desktop `.rpl`. Proof: matching CRC line.
   **M2a (harness) accepted 2026-10-16**: exact RNG port + `.rpl` codec + chain verifier, K and
   sim-draw metrics on 6 real r15472 replays (`docs/M2-SPIKE.md`, `M2 INTEGRATION PASS (97 checks)`).
-  **M2b (sim core: tick loop, pathfinding, click-to-move) next** — the harness is its parity instrument.
+  **M2b (sim core: tick loop, pathfinding, click-to-move) next** — the harness is its parity
+  instrument; this is the **first playable slice** (units walk the real map on click).
 - **M3 economy slice**: one production chain end-to-end (forest → sawmill → boards), serfs.
 - **M4 combat slice**: warriors, houses HP, projectiles, fog of war.
 - **M5 skirmish AI**: ported AI mayor/general (may start simplified, same interfaces).

@@ -2,6 +2,19 @@
 
 Newest first. Only decisions the lead/owner actually made, with evidence.
 
+## 2026-10-16 — Owner directive: full playability, correct LAN/internet, he hosts
+
+- Maxim (empire chat, verbatim): "i see there just choosing items can u make it fully workable and
+  lan or internet we can add correctly and ill host it on some site".
+- Read: the shipped viewers (sprite picker, map viewer) are instruments, not the product; the target
+  is the playable game. "Correctly" for MP = the remake's own lockstep design (command-only wire,
+  +10 tick buffer, per-tick CRC, resync) on top of the deterministic sim the M2 harness validates —
+  not a bolt-on. Hosting = static client bundle + one small Node relay; LAN and internet run the
+  same relay code path.
+- Effect on the ladder: M2b (playable slice) stays next; M6 (multiplayer) is a first-class target,
+  not an extra; nothing is re-scoped away. Logged here because kam-web is not a center loop (there
+  is no `owner.mjs` verb that would log a non-loop repo order; this file is the project's log).
+
 ## 2026-10-16 — M2a accepted: replay-CRC parity harness lands (workers A + B)
 
 - **`M2 INTEGRATION PASS (97 checks)`** (lead, `%TEMP%\opencode\kamweb_m2_verify.mjs`): all six r15472
