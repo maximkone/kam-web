@@ -2,6 +2,25 @@
 
 Newest first. Only decisions the lead/owner actually made, with evidence.
 
+## 2026-10-16 — M1 errata: terrain sprite index off-by-one (caught during M2b, fixed)
+
+- The M1 viewer (and M1's §2.3 wording) used atlas entry `i = terrain+1`; the correct entry is
+  `i = terrain`. Game sprite ids are 1-based (`KM_ResSprites.pas:780` `aStartingIndex = 1`, callers
+  2035/2041) and M0's atlas `i` is the 0-based rxx file ordinal, so `atlas i = game render id − 1`;
+  the terrain renderer binds `gGFXData[rxTiles, BaseLayer.Terrain + 1]` (`KM_RenderTerrain.pas:634`).
+- Proven two ways before touching code: rendering Town Tutorial (45,45)–(90,90) with raw sprites
+  gives a clean town at `i = terrain` (grass, cobble road, bridge, rock) and water/black speckles at
+  `i = terrain+1` (`%TEMP%\opencode\kamweb_align_render.mjs` → `kamweb_align.png`); colour families
+  confirm (`kamweb_offby1_check.mjs`): sprite 245 `tkAbyss` pure black, 244 `tkFastWater` teal, 164
+  iron-mountain rock. Unit side: `i = step` gives a coherent 8-frame walk cycle, `i = step+1` wraps
+  to a foreign sprite (`kamweb_unit_align.mjs` → `kamweb_unit_align_0_6.png`).
+- Fix: `apps/web/mapdemo.ts` and `apps/web/play.ts` use `i = terrain` (play.ts: `SPRITE_ID_ADD = 0`);
+  errata written into M1-SPIKE §2.3 and §7. Re-verified: `LEAD M1 VERIFY PASS` on a fresh server
+  (8126) and D's CDP journey 16/16 (arrival 124 = simTicks).
+- The old "terrain 244 is the pure black sprite" claim was this artifact: the black sprite belongs to
+  terrain 245 (`tkAbyss`, 123 tiles — the black cliff faces of the iron-mountain band), and the M1
+  screenshots' dark patches were real abyss content plus off-by-one speckles.
+
 ## 2026-10-16 — Owner directive: full playability, correct LAN/internet, he hosts
 
 - Maxim (empire chat, verbatim): "i see there just choosing items can u make it fully workable and

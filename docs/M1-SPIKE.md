@@ -37,7 +37,7 @@ tile[0] = terrain 192 / height 0 / rot 0 / obj 255; tile at x=64,y=64 (index `y*
 - Constants: `CELL_SIZE_PX = 40` (tile square on screen), `CELL_HEIGHT_DIV = 33.333` (`KM_Defaults.pas` lines 13-14). A height delta of 33.33 shifts a vertex by one tile (40 px); i.e. screen offset px = `height * 40 / 33.333 = height * 1.2`.
 - Tile (tX,tY) (1-based) covers the world square `[tX-1..tX] x [tY-1..tY]` (times 40 px). Corner heights (`RenderQuadTexture`, lines 522-538):
   TL ← RenderHeight[tY, tX], BL ← [tY+1, tX], BR ← [tY+1, tX+1], TR ← [tY, tX+1]; each vertex `y -= RenderHeight / CELL_HEIGHT_DIV`. `RenderHeight` = the tile's height byte (`GetRenderHeight`, flat-terrain debug mode off). Reads outside the map = 0.
-- Texture: `Tileset.rxx` sprite `BaseLayer.Terrain + 1` (32×32 px), from `out/atlas/Tileset.json` (sprite entry with `i == terrain+1`); rotation via UV corner permutation (`GetTileUV` lines 233-270): base UV corners for quad corners TL,BL,BR,TR are (u1,v1),(u1,v2),(u2,v2),(u2,v1); `rot&1` rotates the corner mapping by one step (4-1-2-3), `rot&2` swaps 1↔3 and 2↔4. Apply `rot & 3`.
+- Texture: `Tileset.rxx` sprite `BaseLayer.Terrain + 1` (32×32 px), from `out/atlas/Tileset.json` (sprite entry with `i == terrain` — errata 2026-10-16: the game binds `gGFXData[rxTiles, Terrain+1]` and atlas `i` = game render id − 1, so the atlas entry is `i == terrain`, not `terrain+1`); rotation via UV corner permutation (`GetTileUV` lines 233-270): base UV corners for quad corners TL,BL,BR,TR are (u1,v1),(u1,v2),(u2,v2),(u2,v1); `rot&1` rotates the corner mapping by one step (4-1-2-3), `rot&2` swaps 1↔3 and 2↔4. Apply `rot & 3`.
 - The map border columns (X=1/MapX, Y=1/MapY) fade to black in the game (lighting) — **out of scope for M1**, note only.
 
 ## 3. Worker A — map parser + exporter (owns `packages/map/**`, `tools/mapinfo/**`)
@@ -87,7 +87,7 @@ Replace the hardcoded `/apps/web/demo.js` route with `^/apps/web/([A-Za-z0-9_-]+
 
 - Fetch `/out/maps/TownTutorial.json` (pre-made; the data contract is §3.2) + `/out/atlas/Tileset.json` + its sheet PNGs (reuse the atlas convention; you may import nothing — copy what you need from `demo.ts`).
 - Build ONE static vertex buffer for all tiles (4 verts + 6 indices per tile, ~16384 tiles) and render with a single `drawElements` per frame; camera = uniform translate+scale.
-- World coordinates: px, `x = tX*40`, `y = tY*40 - height*1.2` per corner per §2.3 (corner heights TL/BL/BR/TR as listed; out-of-map = 0). UVs: from the atlas sprite `terrain+1` rect, corners permuted by `rot & 3` per §2.3. Store UVs in vertex attributes so the shader needs only a camera uniform.
+- World coordinates: px, `x = tX*40`, `y = tY*40 - height*1.2` per corner per §2.3 (corner heights TL/BL/BR/TR as listed; out-of-map = 0). UVs: from the atlas sprite `terrain` rect (errata 2026-10-16, see §2.3 above), corners permuted by `rot & 3` per §2.3. Store UVs in vertex attributes so the shader needs only a camera uniform.
 - Camera: starts fit-to-map (whole 128×128 map visible); drag pans; wheel zooms around the cursor (factor 1.5 per notch, clamp 0.25..8); `R` resets.
 - HUD (bottom-left, like demo): map name, mapX×mapY, zoom, and the tile under the cursor: `tile (x,y) terrain=… rot=… height=… obj=…`.
 - Background: flat `#202830`; tiles with alpha blend over it (some border tiles are transparent — that's also what the game shows over black).
@@ -119,9 +119,12 @@ Accepted deviations from §4.2 as shipped (patched here at acceptance):
 2. HUD adds `index=` (tile index `(y-1)*mapX+(x-1)`, same as `--check` §2.2) and `cam=(x,y)`
    (world px of the view centre, rounded). All specced fields unchanged.
 
-Black-quad check (worker B's claim, corrected by the lead): of the 149 terrain ids in Town Tutorial
-exactly **one is a pure black sprite — terrain 244, 5 tiles** (i=245, all RGB 0, alpha 255);
-terrains 164 (571 tiles) and 230 (2 tiles) are *dark but structured* (mean RGB ≈ 10 — 164 has 259
-pixels above 8, it is the dark forest-floor tile). The dark cliff shadows in the screenshots are
-real `Tileset.rxx` pixel content, not a renderer bug (script `%TEMP%\opencode\kamweb_black_scan.mjs`,
-magnified dumps `out/check-terrain-{164,230,244}.png`).
+Black-quad check (worker B's claim, corrected twice — final 2026-10-16): the earlier finding was an
+artifact of the sprite-index off-by-one (errata §2.3). With the correct mapping (`i = terrain`) the
+pure black sprite belongs to **terrain 245 `tkAbyss`, 123 tiles** — the black cliff faces of the
+iron-mountain band (bbox x 57..85, y 71..117, all obj=255), which the game renders black by design
+(no special-casing in `KM_RenderTerrain.pas`); terrain 244 (`tkFastWater`, 5 tiles) is the teal
+fast-water sprite; 164 (571 tiles) is the iron-mountain rock (mean RGB 152,113,36) and 230 (2 tiles)
+the light grassy-water sprite. Proof: `%TEMP%\opencode\kamweb_offby1_check.mjs` (colour table) and
+`%TEMP%\opencode\kamweb_align_render.mjs` (`%TEMP%\opencode\kamweb_align.png`: region (45,45)–(90,90),
+left `i = terrain` renders a clean town, right `i = terrain+1` shows water/black speckles).

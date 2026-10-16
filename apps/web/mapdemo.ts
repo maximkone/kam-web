@@ -8,7 +8,8 @@
 //   tile (tX,tY) 1-based covers [tX-1..tX] x [tY-1..tY] * 40 px; corner heights
 //   TL=[tY,tX], BL=[tY+1,tX], BR=[tY+1,tX+1], TR=[tY,tX+1], each vertex y -= h * 40/33.333;
 //   reads outside the map = 0. UV corners TL,BL,BR,TR = (u1,v1),(u1,v2),(u2,v2),(u2,v1) from the
-//   atlas sprite with i == terrain+1, permuted by rot&3 (rot&1 -> 4-1-2-3, rot&2 -> swap 1<->3, 2<->4).
+//   atlas sprite with i == terrain (errata 2026-10-16: the game binds gGFXData[rxTiles, terrain+1]
+//   and atlas i = game render id - 1), permuted by rot&3 (rot&1 -> 4-1-2-3, rot&2 -> swap 1<->3, 2<->4).
 // Drag pans, wheel zooms at the cursor (1.5x per notch), R resets to fit. Kept dependency-free
 // on purpose; transpiled to /apps/web/mapdemo.js by serve.ts.
 
@@ -134,13 +135,14 @@ function buildVbo(byI: Map<number, AtlasSprite>): void {
       const terrain = tiles[off];
       const rot = tiles[off + 2] & 3; // original maps store raw rot > 3 (section 2.1); render uses rot & 3
 
-      // Sprite for terrain id t is the atlas entry with i == t + 1 (section 2.3).
+      // Sprite for terrain id t is the atlas entry with i == t (section 2.3 errata 2026-10-16: the game
+      // binds gGFXData[rxTiles, terrain+1] and atlas i = game render id - 1).
       // A tile with no sprite keeps zero UVs (samples nothing visible); the towns have all of them.
       let u1 = 0;
       let v1 = 0;
       let u2 = 0;
       let v2 = 0;
-      const sp = byI.get(terrain + 1);
+      const sp = byI.get(terrain);
       if (sp !== undefined) {
         const sheet = atlas.sheets[sp.s]!;
         u1 = sp.x / sheet.w;
