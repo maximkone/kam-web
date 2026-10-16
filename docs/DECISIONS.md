@@ -2,6 +2,21 @@
 
 Newest first. Only decisions the lead/owner actually made, with evidence.
 
+## 2026-10-16 — M2a accepted: replay-CRC parity harness lands (workers A + B)
+
+- **`M2 INTEGRATION PASS (97 checks)`** (lead, `%TEMP%\opencode\kamweb_m2_verify.mjs`): all six r15472
+  replays reproduce `docs/M2-SPIKE.md` §2.4 exactly (seed 1247813158, K=12, first fail #16, pair stats,
+  invariants, payload round-trips with the payload sha recomputed by the lead); 16/16 tests pass,
+  `tsc --noEmit` exit 0, M0/M1 regressions pass. Acceptance record: `docs/M2-SPIKE.md` §7.
+- Worker B's `rnginfo` reproduces the `.rng` ground truth (175518 records, chain 175517/175517,
+  StoreCommand 6291); B's independently generated synthetic replays cross-check through A's
+  `replayinfo` — every key equal (two independent RNG/BSGS implementations agree).
+- Lead correction: `autosave_after_pt_end.rpl` §2.4 ticks fixed to `lastRecordTick=36004`,
+  `lastCheckTick=36003` (the file ends with two trailing SKIP records). Worker A's implementation was
+  correct; the lead's draft expectation had an off-by-one (facts-extractor read offset).
+- Next: **M2b** = deterministic sim core (fixed tick loop in the frozen §2.3 order, pathfinding port,
+  click-to-move), with the harness as the parity instrument and `.rng` tick dumps as the sim-draw test.
+
 ## 2026-10-16 — M2 scope frozen: replay-CRC parity harness (`docs/M2-SPIKE.md`)
 
 - M2 proof target redefined by the lead after ground-truth work: full desktop parity needs the sim,

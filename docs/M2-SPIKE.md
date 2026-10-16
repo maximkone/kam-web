@@ -94,7 +94,7 @@ All six: `rev=r15472`, `extra=0`, **seed 1247813158**, first check `#2 t=4 rand=
 | autosave03.rpl | 596014 | `db680d99b3b47832` | 82376 | 82306 | 39604 | 39603 | 49958 | 32347 |
 | autosave04.rpl | 586954 | `9d1f7b82e0b0f18c` | 81130 | 81061 | 39003 | 39002 | 49266 | 31794 |
 | autosave05.rpl | 577924 | `86b686b4fb028d77` | 79884 | 79816 | 38403 | 38402 | 48575 | 31240 |
-| autosave_after_pt_end.rpl | 541002 | `87c97b600a1e3f95` | 74842 | 74778 | 36005 | 36004 | 45830 | 28947 |
+| autosave_after_pt_end.rpl | 541002 | `87c97b600a1e3f95` | 74842 | 74778 | 36004 | 36003 | 45830 | 28947 |
 
 - `pairs.ok + pairs.bad == checks − 1` and `Σ histogram counts == pairs.bad` (invariants).
 - Zero-rand records (dummy excluded): autosave01..05 = 72/71/70/69/68, after_pt_end = 64;
@@ -307,6 +307,26 @@ Sim internals (units/houses/deliveries/pathfinding), browser/viewer integration,
 tests only — never produce files meant to be replayed by the original game), pre-r15472 `.rpl`
 variants, `--experimental` compression tricks, compressed-layer byte equality.
 
-## 7. Lead acceptance record
+## 7. Lead acceptance record (2026-10-16)
 
-_(filled in by the lead after the dispatch; acceptance numbers come from re-running the §5 commands.)_
+Workers: **A** (`packages/sim/rng.ts`, `packages/replay/**`, `tools/replayinfo/**`) and **B**
+(`tools/rnginfo/**`, `tools/synth/**`). The lead re-ran every worker proof; the independent integration
+verifier (`%TEMP%\opencode\kamweb_m2_verify.mjs`, all results in `%TEMP%\opencode\m2-verify-out.txt`):
+
+- **`M2 INTEGRATION PASS (97 checks)`**
+- All six replays: sha16, seed 1247813158, count/checks/lastRecordTick/lastCheckTick, K=12, first fail
+  `#16 t=10 gicTempDoNothing h=4 file=615217756 sim=1527758834` == §2.4; invariants `ok+bad == checks−1`,
+  `ΣextraPairs == bad`, `anomalies = 0`; autosave01 `extra top24` == §2.4.
+- `--roundtrip` all six: written payload == the lead's own `inflate(original)` byte-for-byte
+  (payload sha recomputed independently by the lead); record-count identity holds; ~1 s per file.
+- `node --test packages/sim/rng.test.ts packages/replay/rpl.test.ts` → 16/16 pass; `npx tsc --noEmit` exit 0.
+- B: `rnginfo` reproduces §2.5 exactly on `autosave01.rng`; all six `.rng` files parse with `chainBad=0`
+  (one-step links 147653 / 121435 / 116527 / 106807 / 101105 on autosave02..05, after_pt_end).
+- Adversarial cross-check: B's independently generated fixtures (`exact`, `corrupt`, `multirec`) driven
+  through A's `replayinfo --json` — key sets and every value equal to B's `expect.json`
+  (incl. `corrupt`: k=776, firstFail.index=777). Two independent RNG + BSGS implementations agree.
+- **Lead correction to §2.4 found by this verification**: `autosave_after_pt_end.rpl` ends with *two*
+  trailing SKIP records (`#74841 cmd=50`, `#74842 cmd=52`, both tick 36004) → `lastRecordTick=36004`,
+  `lastCheckTick=36003` (the table above is patched; worker A's tool was right, the lead's draft
+  expectation was wrong — the lead's facts-extractor had an off-by-one read offset).
+- Regressions re-run by the lead: `CHECK PASS` (M0 converter), `MAP CHECK PASS` (M1) — both exit 0.
