@@ -3,9 +3,9 @@
 Next rung after M2b (`docs/PLAN.md` §3): **one production chain end-to-end (forest → sawmill →
 boards), serfs** — on the real Town Tutorial village, deterministic, and visible in the browser.
 
-Slice shape: load the real mission (`Town Tutorial.dat`) — 21 houses, 60+ street tiles, ~80 units,
-starting wares — run the chain headlessly at the frozen tick rate (`tools/econsim`), render it in
-`play.html` (houses, roads, trees, wares, serfs).
+Slice shape: load the real mission (`Town Tutorial.dat`) — 21 houses, 249 street tiles, 81 units,
+22 starting-ware lines — run the chain headlessly at the frozen tick rate (`tools/econsim`), render
+it in `play.html` (houses, roads, trees, wares, serfs).
 
 Workers: **E** = mission/house data + economy sim + CLI (headless, `packages/**` + `tools/econsim/**`),
 **F** = viewer (`apps/web/**`). The lead freezes this spec, verifies, commits. Same rules as M2b:
@@ -77,13 +77,17 @@ combat, save/load, fog of war, exact logistics bid math (§2.7).
   (`houses/KM_HouseStore.pas:96-112`) clamps the stock at 65535 and **creates an offer**
   (`AddOffer(store, ware, qty)`). `ware` = script id (0 trunk … 27 fish).
 - `!SET_FIELD x y` (corn) parsed and ignored in v0 (`:459-460`).
-- **Town Tutorial facts (lead's probe, `%TEMP%\opencode\kamweb_m3_village.mjs` / `_sections.mjs`)**:
-  hand 0 (human) = north village: store (16,17), streets 13–15 × 16–18, ~7 units; **hand 1 (AI,
-  start 14,112) = the economy village**: 19 houses incl. **woodcutter hut (4,119)**,
-  **sawmill (8,115)**, **store (15,113)**, farms (14,118)/(10,122), quarry (10,112), school
-  (19,116), inns, workshops, barracks, tannery, watchtowers; 60+ street tiles around x 3–35,
-  y 90–122; ~70 units; hand 2 (AI) = NE village: store (116,8), inn (125,11). The slice demo =
-  hand 1's village (all hands are loaded).
+- **Town Tutorial facts (lead's independent parse, `%TEMP%\opencode\kamweb_m3_leadmission.mjs`;
+  corrected counts after the first probe)**: 21 houses / 249 streets / 81 units / 22 ware lines.
+  hand 0 (human) = north village: store (16,17), streets 13–15 × 16–18 (9 streets), 7 units, 8 ware
+  lines; **hand 1 (AI, start 14,112) = the economy village: 18 houses** incl. **woodcutter hut
+  (4,119)**, **sawmill (8,115)**, **store (15,113)**, farms (14,118)/(10,122), quarry (10,112),
+  school (19,116), inns, workshops, barracks, tannery, watchtowers; **221 street tiles** around
+  x 3–35, y 90–122; 30 units; 10 ware lines (trunks 30, stone 9000, timber 20, iron 100, gold 9000,
+  wine 20, bread 9000, leather 15, sausage 9000, horse 9000); hand 2 (AI) = NE village: 2 houses
+  (store (116,8), inn (125,11)), 19 streets, 44 units, 4 ware lines. The slice demo = hand 1's
+  village (all hands are loaded). Canonical sha256 of the parsed lists (lead's format):
+  `e7d2c5ddcc00e87304139defe9a663533b7f33fb028cb98cafa4df1c10e894d3`.
 
 ### 2.2 `houses.dat`
 
