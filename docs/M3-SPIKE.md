@@ -435,3 +435,34 @@ Per tick (`game/KM_Game.pas:3081-3114`):
 - Accepted v0 divergences (documented in module headers): carpenter cycle frozen at 361 ticks (the
   as-coded stay pattern measures 358 — a future parity task); goIn/goOut = 1 tick; logistics
   matching rule per §2.7; footprint from the hardcoded PlanYX per the §2.2 errata.
+
+### 7.2 Worker F — playable economy village: accepted
+
+- `npx tsc --noEmit` exit 0; `node apps/web/serve.ts --check` → `SERVE CHECK PASS`. F's own runs
+  (port 8137): CDP 29/29, 13/13 route probes (incl. `/packages/mission|assets|sim/*.js` = 200),
+  tree-lifecycle run 6/6, screenshots.
+- Lead's independent CDP run (`%TEMP%\opencode\kamweb_m3_leadcdp.mjs`, fresh headless Edge, live
+  server on 8140): **RESULT PASS pass=22 fail=0** — `#err` empty; boot counters houses 21,
+  roadTiles 249, serfs 34, fullTrees 159 (147 map + 12 demo), storeTrunks 30; `frameStats`
+  missingSprites 0 / housesDrawn 21 / unitsDrawn 49; camera key 1 → cam (640,680) (north village);
+  a real left click selects uid 22 and a real right click moves it (M2b click-to-move works on the
+  M3 page); after `fastForward(3000)` → tick 3022: fullTrees 159→157, stumps 5 (obj 37/41),
+  timber 100→113, storeTrunks 30→18, events 298; wheel zoom 1.5→2.25; 0 blocked requests; no page
+  exceptions; screenshots `kamweb_m3_lead_shot{,_after}.png` — the after-shot's HUD event line shows
+  `delivery-assigned ware=2 house=12->house=21` (the chain's last hop, timber → store, live).
+- Accepted viewer-side deviations (F's report): `SupplyIn/Out` and mapelem `Anim` are parsed
+  viewer-side from the fetched bytes (the frozen `HouseSpec`/`MapElem` don't carry them);
+  click-to-move is viewer-side for hand-0 units (same timing as M2b); the falling-tree animation can
+  lag the sim ≤1 tick; work animations (swing/saw) are not drawn yet; house height uses the
+  corner-height byte (visual approximation).
+
+### 7.3 Regressions (lead, all exit 0)
+
+- M0: `node tools/import/cli.ts --install "C:\Users\me\Desktop\KaM Remake" --check` → `CHECK PASS`
+  (packs=6 sprites=11962).
+- M1: `node tools/mapinfo/cli.ts "…\Town Tutorial.map" --check` → `MAP CHECK PASS`.
+- M2: `node tools/replayinfo/cli.ts …\autosave01\autosave01.rpl` → seed=1247813158, first check #2
+  t=4 rand=2135059644, K=12/84852, first fail #16 t=10 file=615217756 sim=1527758834, pairs
+  ok=51311 bad=33540, anomalies=0 (the §2.4 numbers).
+- M2b: `node tools/walksim/cli.ts --check` → `WALK CHECK PASS`; M3: `ECON CHECK PASS`; `npm test`
+  62/62; `npx tsc --noEmit` exit 0.

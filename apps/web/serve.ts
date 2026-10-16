@@ -6,11 +6,12 @@
 // the local devDependency compiler (node_modules/typescript/bin/tsc, single-file emit) into
 // out/web/<name>.js, and rebuilt whenever the .ts is newer. Everything else is node: builtins.
 //
-// M2b: /apps/web/play.js is a module graph (play.ts imports packages/{assets,sim}/*.ts), built by one
-// tsc run (--rootDir ROOT --outDir out/web --rewriteRelativeImportExtensions) into
+// M2b/M3: /apps/web/play.js is a module graph (play.ts imports packages/{assets,mission,sim}/*.ts),
+// built by one tsc run (--rootDir ROOT --outDir out/web --rewriteRelativeImportExtensions) into
 // out/web/apps/web/play.js + out/web/packages/**/*.js; those modules are served as
-// /packages/<dir>/<name>.js. /defines/{tiles.json,mapelem.dat,unit.dat} come from KAM_DATA
-// (default: the r15472 install; docs/M2B-SPIKE.md section 2.8).
+// /packages/<dir>/<name>.js. /defines/{tiles.json,mapelem.dat,unit.dat,houses.dat} come from KAM_DATA
+// (default: the r15472 install; docs/M2B-SPIKE.md section 2.8); /mission/TownTutorial.dat (raw bytes)
+// comes from KAM_MISSION (docs/M3-SPIKE.md section 5).
 import { createServer } from 'node:http';
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
@@ -24,9 +25,10 @@ const WEB_TS_DIR = join(ROOT, 'apps', 'web');
 const WEB_JS_DIR = join(ROOT, 'out', 'web');
 const TSC = join(ROOT, 'node_modules', 'typescript', 'bin', 'tsc');
 const WEB_JS_ROUTE = /^\/apps\/web\/([A-Za-z0-9_-]+)\.js$/;
-const MODULE_ROUTE = /^\/packages\/(sim|assets)\/([A-Za-z0-9_-]+)\.js$/;
-const DEFINES_ROUTE = /^\/defines\/(tiles\.json|mapelem\.dat|unit\.dat)$/;
+const MODULE_ROUTE = /^\/packages\/(sim|assets|mission)\/([A-Za-z0-9_-]+)\.js$/;
+const DEFINES_ROUTE = /^\/defines\/(tiles\.json|mapelem\.dat|unit\.dat|houses\.dat)$/;
 const DEFINES_DIR = process.env.KAM_DATA ?? 'C:\\Users\\me\\Desktop\\KaM Remake\\KaM Remake Beta r15472\\data\\defines';
+const MISSION_PATH = process.env.KAM_MISSION ?? 'C:\\Users\\me\\Desktop\\KaM Remake\\Tutorials\\Town Tutorial\\Town Tutorial.dat';
 
 // The play module graph: play.ts plus every file it imports (keep in sync with apps/web/play.ts).
 const PLAY_ENTRY = 'apps/web/play.ts';
@@ -36,11 +38,16 @@ const PLAY_MODULES = [
   'packages/assets/tiledata.ts',
   'packages/assets/mapelem.ts',
   'packages/assets/unitdat.ts',
+  'packages/assets/housedata.ts',
+  'packages/assets/wares.ts',
+  'packages/mission/mission.ts',
+  'packages/map/map.ts',
   'packages/sim/terrain.ts',
   'packages/sim/astar.ts',
   'packages/sim/walk.ts',
   'packages/sim/sim.ts',
   'packages/sim/rng.ts',
+  'packages/sim/economy.ts',
 ];
 
 const MIME: Record<string, string> = {
@@ -127,6 +134,16 @@ const server = createServer((req, res) => {
 
   if (path === '/api/packs') {
     send(res, 200, MIME['.json']!, JSON.stringify(listPacks()));
+    return;
+  }
+
+  // Mission script from the KaM install (raw bytes; KAM_MISSION overrides for other installs).
+  if (path === '/mission/TownTutorial.dat') {
+    if (!existsSync(MISSION_PATH)) {
+      send(res, 404, 'text/plain; charset=utf-8', `not found: ${path} (KAM_MISSION=${MISSION_PATH})`);
+      return;
+    }
+    send(res, 200, MIME['.map']!, readFileSync(MISSION_PATH));
     return;
   }
 
@@ -222,9 +239,18 @@ function check(): void {
     ['out/maps/TownTutorial.json', join(ROOT, 'out', 'maps', 'TownTutorial.json')],
     ['out/atlas/Tileset.json', join(ATLAS_DIR, 'Tileset.json')],
     ['out/atlas/Units.json', join(ATLAS_DIR, 'Units.json')],
+    ['out/atlas/Houses.json', join(ATLAS_DIR, 'Houses.json')],
+    ['out/atlas/Trees.json', join(ATLAS_DIR, 'Trees.json')],
     ['defines/tiles.json', join(DEFINES_DIR, 'tiles.json')],
     ['defines/mapelem.dat', join(DEFINES_DIR, 'mapelem.dat')],
     ['defines/unit.dat', join(DEFINES_DIR, 'unit.dat')],
+    ['defines/houses.dat', join(DEFINES_DIR, 'houses.dat')],
+    ['mission/TownTutorial.dat', MISSION_PATH],
+    // The M3 modules must be emitted by the play graph build (served as /packages/**/*.js).
+    ['out/web/packages/mission/mission.js', join(WEB_JS_DIR, 'packages', 'mission', 'mission.js')],
+    ['out/web/packages/assets/housedata.js', join(WEB_JS_DIR, 'packages', 'assets', 'housedata.js')],
+    ['out/web/packages/assets/wares.js', join(WEB_JS_DIR, 'packages', 'assets', 'wares.js')],
+    ['out/web/packages/sim/economy.js', join(WEB_JS_DIR, 'packages', 'sim', 'economy.js')],
   ];
   for (const [label, abs] of files) {
     if (!existsSync(abs)) fails.push(`missing ${label} (${abs})`);

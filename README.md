@@ -24,9 +24,14 @@ Chrono Divide does for Red Alert 2.
   sha256 identical to the lead's independent checker, CDP journey 16/16, `npm test` 41/41; acceptance
   record in `docs/M2B-SPIKE.md` §7 (includes the lead's sprite-index off-by-one errata fix).
   The harness and the `.rng` oracle stay the parity instruments (K grows with the sim).
-- **M3 — economy slice v0: IN PROGRESS** (spec frozen 2026-10-17, `docs/M3-SPIKE.md`). The real Town
-  Tutorial mission (houses/streets/units/wares) + the woodcutter → sawmill → store chain with serfs,
-  deterministic (`tools/econsim`) and visible in `play.html`; workers E (sim core) + F (viewer).
+- **M3 — economy slice v0: DONE** (accepted 2026-10-17). The real Town Tutorial mission (21 houses,
+  249 streets, 49 humanoid units + 32 animals, starting wares) + the woodcutter → sawmill → store
+  chain with serfs; deterministic headless run (`node tools/econsim/cli.ts --check` → `ECON CHECK
+  PASS`, sha256-frozen) and playable in `/play.html` (houses/roads/trees/wares/serfs, HUD event
+  line). Lead-verified: CDP 22/22, `npm test` 62/62; workers E (sim core) + F (viewer); record in
+  `docs/M3-SPIKE.md` §7. Two documented demo tweaks (seeded 12-tree forest + a store timber order).
+- **M3b — any-map + picker: NEXT** (spec frozen 2026-10-17, `docs/M3B-SPIKE.md`). Load any of the
+  install's 243 maps (Remake + standard formats) with its mission; map picker.
 
 ## Quickstart (Windows, Node >= 24)
 

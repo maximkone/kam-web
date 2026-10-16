@@ -2,6 +2,21 @@
 
 Newest first. Only decisions the lead/owner actually made, with evidence.
 
+## 2026-10-17 — M3 accepted: the economy village runs (workers E + F)
+
+- Worker E (sim core) verified by the lead: `ECON CHECK PASS` (6000 ticks; two runs identical,
+  sha256 `6d780b62…c41`); `npm test` 62/62; the lead's independent mission/houses dumps match E's
+  parsers on every count and spec value; accepted v0 divergences in `docs/M3-SPIKE.md` §7.1
+  (carpenter cycle frozen at 361 ticks; footprint = the hardcoded PlanYX per the §2.2 errata).
+- Worker F (viewer) verified by the lead: CDP run **22/22** on a live server — the real village
+  renders (houses, roads, trees, serfs, team tints) and the chain advances in the browser (trees
+  felled → stumps, timber 100→113, store trunks 30→18; the HUD event line shows timber → store
+  deliveries); M2b click-to-move still works on the M3 page; record in §7.2.
+- Regressions re-run by the lead: M0 `CHECK PASS` · M1 `MAP CHECK PASS` · M2 autosave01 exact §2.4
+  numbers · M2b `WALK CHECK PASS` · M3 `ECON CHECK PASS` + `npm test` 62/62 + tsc 0.
+- Next: **M3b** (any-map + picker; spec `docs/M3B-SPIKE.md` frozen) → M4 combat → M5 advanced AI
+  (owner priority) → M6 multiplayer.
+
 ## 2026-10-17 — Owner directive: play vs the Advanced AI on real maps
 
 - Maxim (empire chat, verbatim): "mm can u integrate there advanced ai from C:\Users\me\Desktop\
