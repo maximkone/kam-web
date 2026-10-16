@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>kam-web M1 — Town Tutorial terrain</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #202830; color: #cfd8e3;
+               font: 13px/1.4 ui-monospace, Consolas, monospace; }
+  #hud { position: fixed; left: 10px; bottom: 8px; opacity: .85; white-space: pre; pointer-events: none; }
+  #hint { position: fixed; right: 10px; bottom: 8px; opacity: .5; pointer-events: none; }
+  #hint a { color: inherit; pointer-events: auto; }
+  #err { position: fixed; left: 10px; top: 8px; color: #ff7d7d; white-space: pre-wrap; }
+  canvas { display: block; width: 100vw; height: 100vh; cursor: grab; }
+  canvas.drag { cursor: grabbing; }
+</style>
+</head>
+<body>
+<canvas id="cv"></canvas>
+<div id="hud"></div>
+<div id="hint">drag pan &#183; wheel zoom &#183; R reset &#183; <a href="/">sprite viewer</a></div>
+<div id="err"></div>
+<script type="module" src="/apps/web/mapdemo.js"></script>
+</body>
+</html>

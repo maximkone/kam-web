@@ -2,6 +2,24 @@
 
 Newest first. Only decisions the lead/owner actually made, with evidence.
 
+## 2026-10-16 — M1 accepted: Town Tutorial renders in the browser (viewer = worker B)
+
+- Lead re-run, fresh headless Edge against the live dev server: **`LEAD M1 VERIFY PASS (15 checks)`**
+  — fit `128×128 zoom=0.138 cam=(2560,2560)`; 4 hover probes: HUD tile values byte-equal the frozen
+  `out/maps/TownTutorial.json` (e.g. `tile (65,66) index=8384 terrain=0 rot=2 height=36 obj=255`);
+  wheel ×1.5/notch with the world point under the cursor fixed (<0.5 px); `R` resets; wheel-out
+  clamps at fit; `#err` empty; console clean; `blocked: []` (`%TEMP%\opencode\kamweb_m1_verify.mjs`).
+- Deviations accepted, §4.2 patched (`docs/M1-SPIKE.md` §7): wheel minimum is `min(0.25, fitZoom)`
+  so the 128² fit view (0.138 at 1256×708) stays reachable; HUD adds `index=` and `cam=(x,y)`.
+- Black-quad claim (worker B), corrected by the lead: of the 149 terrains in Town Tutorial only
+  **244 (5 tiles) is a pure black sprite**; 164 (571) and 230 (2) are dark but structured
+  (mean RGB ≈ 10). Dark cliff shadows are real `Tileset.rxx` content, not a renderer bug
+  (`%TEMP%\opencode\kamweb_black_scan.mjs`, dumps `out/check-terrain-{164,230,244}.png`).
+- Regressions re-run by the lead: `CHECK PASS` (M0 converter, exit 0) · `MAP CHECK PASS` (17/17,
+  exit 0) · `npx tsc --noEmit` exit 0. Viewer math reviewed against `KM_RenderTerrain.pas` 2D branch.
+- Dev server situation settled: stale 8123 (lead, pre-viewer code) stopped; 8123 now serves the
+  current code (detached pid 12180), worker B's 8124 left running — both current code.
+
 ## 2026-10-16 — M1 parser accepted (worker A) — proofs re-run by the lead
 
 - `node tools/mapinfo/cli.ts "…\Town Tutorial\Town Tutorial.map" --check` → `MAP CHECK PASS`

@@ -11,8 +11,9 @@ Chrono Divide does for Red Alert 2.
 
 - **M0 — sprite pipeline: DONE** (accepted 2026-10-16). `.rxx` → PNG atlases + JSON manifest,
   WebGL2 sprite viewer with pivot/mask/rotation-agnostic display. Proofs in the M0 commit body.
-- **M1 — map + terrain viewer** (in progress): parse real `.map` files, render terrain tiles
-  with corner heights, pan/zoom, tile HUD.
+- **M1 — map + terrain viewer: DONE** (accepted 2026-10-16). Real `.map` → terrain in the browser:
+  corner heights, pan/zoom, tile HUD; `MAP CHECK PASS` + browser proofs in the M1 commit body,
+  acceptance record in `docs/M1-SPIKE.md` §7.
 
 ## Quickstart (Windows, Node >= 24)
 
@@ -25,6 +26,7 @@ node tools/mapinfo/cli.ts "C:\Users\me\Desktop\KaM Remake\Tutorials\Town Tutoria
 
 # 3) Serve the repo and open the viewers
 node apps/web/serve.ts           # sprite viewer http://127.0.0.1:8123/ , map viewer /map.html
+                                 # if the port is taken: node apps/web/serve.ts --port 8124
 ```
 
 Output lands in `out/` (gitignored — never committed).

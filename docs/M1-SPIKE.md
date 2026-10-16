@@ -102,3 +102,26 @@ Replace the hardcoded `/apps/web/demo.js` route with `^/apps/web/([A-Za-z0-9_-]+
 ## 6. Non-goals for M1
 
 Object/tree/house sprites, fog of war, lighting/shadows, water animation frames, Remake-format tile layers/overlays, minimap, missions/`.dat`, editor.
+
+## 7. Lead acceptance record (2026-10-16)
+
+Fresh headless Edge run against the live dev server (`http://127.0.0.1:8124/map.html`, script
+`%TEMP%\opencode\kamweb_m1_verify.mjs`): **`LEAD M1 VERIFY PASS (15 checks)`** — fit view
+`128×128 zoom=0.138 cam=(2560,2560)` (= exact fit for 1256×708); 4 hover probes: HUD tile fields
+byte-equal the frozen `out/maps/TownTutorial.json`; wheel zoom ×1.5 per notch with the world point
+under the cursor fixed (<0.5 px world); `R` resets to fit; wheel-out clamps at fit; `#err` empty;
+page console clean; `blocked: []`. Screenshots `out/m1-lead-fit.png`, `out/m1-lead-zoom.png`.
+
+Accepted deviations from §4.2 as shipped (patched here at acceptance):
+
+1. Wheel zoom minimum is `min(0.25, fitZoom)`, not flat `0.25`: on viewports where the fit zoom is
+   below 0.25 (0.138 at 1256×708 for the 128×128 map) the fit view stays reachable. Maximum 8 unchanged.
+2. HUD adds `index=` (tile index `(y-1)*mapX+(x-1)`, same as `--check` §2.2) and `cam=(x,y)`
+   (world px of the view centre, rounded). All specced fields unchanged.
+
+Black-quad check (worker B's claim, corrected by the lead): of the 149 terrain ids in Town Tutorial
+exactly **one is a pure black sprite — terrain 244, 5 tiles** (i=245, all RGB 0, alpha 255);
+terrains 164 (571 tiles) and 230 (2 tiles) are *dark but structured* (mean RGB ≈ 10 — 164 has 259
+pixels above 8, it is the dark forest-floor tile). The dark cliff shadows in the screenshots are
+real `Tileset.rxx` pixel content, not a renderer bug (script `%TEMP%\opencode\kamweb_black_scan.mjs`,
+magnified dumps `out/check-terrain-{164,230,244}.png`).
