@@ -44,6 +44,9 @@ later; CRC per tick; mismatch → pause + resync.
   Proof: browser shows `Tutorials/Town Tutorial.map`.
 - **M2 deterministic sim core**: fixed tick, own RNG, pathfinding port, click-to-move;
   **replay-CRC parity harness** vs a desktop `.rpl`. Proof: matching CRC line.
+  **M2a (harness) accepted 2026-10-16**: exact RNG port + `.rpl` codec + chain verifier, K and
+  sim-draw metrics on 6 real r15472 replays (`docs/M2-SPIKE.md`, `M2 INTEGRATION PASS (97 checks)`).
+  **M2b (sim core: tick loop, pathfinding, click-to-move) next** — the harness is its parity instrument.
 - **M3 economy slice**: one production chain end-to-end (forest → sawmill → boards), serfs.
 - **M4 combat slice**: warriors, houses HP, projectiles, fog of war.
 - **M5 skirmish AI**: ported AI mayor/general (may start simplified, same interfaces).
