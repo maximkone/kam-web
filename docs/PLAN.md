@@ -34,7 +34,8 @@ Unofficial **web port of KaM Remake** — playable in a browser, in the spirit o
 apps/web/       WebGL2 sprite renderer, camera, minimap, DOM UI, WebAudio
 apps/server/    (M6) Node: lobby + relay + chat; lockstep commands + CRC relay
 packages/sim/   pure deterministic TS sim, fixed tick, port order:
-                Points -> Pathfinding(JPS) -> Terrain -> Units/Houses/Hands -> AI -> Projectiles/FoW
+                Points -> Pathfinding(AStarNew, the shipped default; JPS is opt-in) -> Terrain ->
+                Units/Houses/Hands -> AI -> Projectiles/FoW
 packages/assets/rxx decoder, atlas packer, defines (.dat) parser, map (.map) parser
 tools/import/   install -> out/atlas (CLI now; in-browser importer later)
 ```
@@ -54,7 +55,8 @@ later; CRC per tick; mismatch → pause + resync. **LAN** = the relay run on the
   **M2a (harness) accepted 2026-10-16**: exact RNG port + `.rpl` codec + chain verifier, K and
   sim-draw metrics on 6 real r15472 replays (`docs/M2-SPIKE.md`, `M2 INTEGRATION PASS (97 checks)`).
   **M2b (sim core: tick loop, pathfinding, click-to-move) next** — the harness is its parity
-  instrument; this is the **first playable slice** (units walk the real map on click).
+  instrument; this is the **first playable slice** (units walk the real map on click). Contract:
+  `docs/M2B-SPIKE.md` (frozen 2026-10-16; workers C sim core + D playable viewer).
 - **M3 economy slice**: one production chain end-to-end (forest → sawmill → boards), serfs.
 - **M4 combat slice**: warriors, houses HP, projectiles, fog of war.
 - **M5 skirmish AI**: ported AI mayor/general (may start simplified, same interfaces).
