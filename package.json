@@ -10,6 +10,7 @@
   },
   "scripts": {
     "import": "node tools/import/cli.ts",
+    "mapinfo": "node tools/mapinfo/cli.ts",
     "serve": "node apps/web/serve.ts"
   },
   "devDependencies": {
