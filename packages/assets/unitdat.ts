@@ -28,6 +28,12 @@ export interface AnimLoop {
 export interface UnitSpec {
   speedRaw: number; // unit.dat speed after the mounted patch (tiles/tick = speedRaw / 240)
   anim: AnimLoop[][]; // [action − 120][dir − 1]
+  // M3: unit mining range in tiles (GetMiningRange, KM_ResUnits.pas 423–433): woodcutter 10,
+  // farmer 10, stonemason 16, fisher 14; 0 for every other unit (the Pascal accessor raises for
+  // them — the economy only ever asks for these four). Optional in the type so the frozen M2b test
+  // literals (`{ speedRaw, anim }`, which must keep type-checking) stay valid; parseUnitDat always
+  // sets it.
+  miningRange?: number;
 }
 
 const SERF_CARRY_SIZE = 15680; // 28 * 8 * 70 (LoadUnitsDat 699)
@@ -39,6 +45,15 @@ const DIR_COUNT = 8; // dirN..dirNW (KM_Points.pas 8)
 const LOOP_SIZE = 70;
 const DEF_MOUNTED_SPEED = 39; // PatchUnitSpec 572
 const MOUNTED_RECORDS = [21, 22, 27]; // utScout / utKnight / utVagabond (591–598)
+
+// GetMiningRange (KM_ResUnits.pas 423–433) by unit.dat record: utWoodcutter 1, utFarmer 4,
+// utFisher 8, utStonemason 10 (UNIT_ID_TO_TYPE order, KM_ResUnits.pas 146–157).
+const MINING_RANGES = new Map<number, number>([
+  [1, 10], // utWoodcutter
+  [4, 10], // utFarmer
+  [8, 14], // utFisher
+  [10, 16], // utStonemason
+]);
 
 function readI16(buf: Uint8Array, o: number): number {
   const v = buf[o] | (buf[o + 1] << 8);
@@ -75,9 +90,33 @@ export function parseUnitDat(buf: Uint8Array): UnitSpec[] {
       anim.push(dirs);
     }
 
-    out.push({ speedRaw, anim });
+    out.push({ speedRaw, anim, miningRange: MINING_RANGES.get(i) ?? 0 });
   }
   return out;
+}
+
+/**
+ * Parse the serf carry animation block: the first 15680 bytes of unit.dat are
+ * `array[WARE_MIN..WARE_MAX, dirN..dirNW] of TKMAnimLoop` (KM_ResUnits.pas 104, 699; 28 wares ×
+ * 8 dirs × 70 B). Returned as [ware][dir] (dir 0 = dirN … 7 = dirNW), the layout GetSerfCarry
+ * (KM_ResUnits.pas 673–677) reads. The shipped file has Count = 8 in every direction.
+ */
+export function parseSerfCarry(buf: Uint8Array): AnimLoop[][] {
+  if (buf.length < SERF_CARRY_SIZE) {
+    throw new Error(`unit.dat: expected at least ${SERF_CARRY_SIZE} bytes of serfCarry, got ${buf.length}`);
+  }
+  const wares: AnimLoop[][] = [];
+  for (let ware = 0; ware < 28; ware++) {
+    const dirs: AnimLoop[] = [];
+    for (let dir = 0; dir < DIR_COUNT; dir++) {
+      const o = (ware * DIR_COUNT + dir) * LOOP_SIZE;
+      const steps = new Int16Array(30);
+      for (let k = 0; k < 30; k++) steps[k] = readI16(buf, o + k * 2);
+      dirs.push({ steps, count: readI16(buf, o + 60), moveX: readI32(buf, o + 62), moveY: readI32(buf, o + 66) });
+    }
+    wares.push(dirs);
+  }
+  return wares;
 }
 
 /** Walk animation loop for one direction: anim[uaWalk − 120][dir − 1] (KM_ResUnits.pas 474–479). */

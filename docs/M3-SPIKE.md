@@ -122,6 +122,12 @@ combat, save/load, fog of war, exact logistics bid math (§2.7).
 - **Footprint** (`houses/KM_Houses.pas:1109-1123`): the house occupies the `BuildArea` cells with
   row `I = Y − pos.Y + 4 ∈ 1..4` and col `K = X − pos.X + 3 ∈ 1..4` → tiles
   `(pos.X + K − 3, pos.Y + I − 4)`; nonzero cell = house tile.
+  **Errata (worker E, verified by the lead):** the runtime `BuildArea` property reads the hardcoded
+  `HOUSE_DAT_X[type].PlanYX` (`res/KM_ResHouses.pas:96, 599`, table `:232-560`), **not** the legacy
+  record field @1428 (the loader never copies it). The parser/economy use the hardcoded PlanYX table
+  (script-id keyed); proof: the legacy field would give the sawmill a 2-tile footprint, the hardcoded
+  area gives its real one. The walkable drop 11883→11705 = 178 tiles = the 21 houses' newly blocked
+  footprint tiles (some footprint cells were already unwalkable).
 - **Entrance** (`:401-410`): `entrance = (pos.X + EntranceOffsetX, pos.Y)`;
   `PointBelowEntrance = (entrance.X, entrance.Y + 1)`.
 - Verified dumps: **Sawmill** (slot 0): WoodPic 1, StonePic 0, WoodPicSteps 35, StonePicSteps 33,
@@ -406,4 +412,26 @@ Per tick (`game/KM_Game.pas:3081-3114`):
 
 ## 7. Acceptance record
 
-(filled by the lead at acceptance)
+### 7.1 Worker E — economy sim core: accepted
+
+- `node tools/econsim/cli.ts --check` → `ECON CHECK PASS` (exit 0), 6000 ticks, 336 events; two
+  consecutive runs print identical numbers and sha256
+  `6d780b62b56f83b3c9f4b1aa2d414ae6186c0a84491843d315554d49f7fcbc41` (only the wall-clock ms differ).
+- `npm test` → **62/62** (41 M0–M2b + 21 new); `npx tsc --noEmit` exit 0;
+  `node tools/walksim/cli.ts --check` → `WALK CHECK PASS`; perturbed `expected.ts` → FAIL + exit 1.
+- Lead's independent cross-check (`%TEMP%\opencode\kamweb_m3_leadvsE.mjs` vs the lead's own
+  `kamweb_m3_leadmission.mjs` / `kamweb_m3_houses.mjs`): mission counts 21 houses / 249 streets /
+  81 units / 22 ware lines and per-hand humanoids 7/30/12 (49 spawned + 32 animals parsed, not
+  spawned) match; hand-1 chain houses `Store(15,113) Woodcutters(4,119) Sawmill(8,115)` and the
+  10 ware lines match; sawmill/hut/store spec values (pics, wares, production, worker rest, anim
+  counts, entrance, costs, worker type, health) match the raw `houses.dat` bytes; unit.dat
+  woodcutter `miningRange 10`; serfCarry trunk dir0 `count 8 step1 321`.
+- Frozen numbers (6000 ticks, scenario on): load houses 21, streets 249, roadTiles 249, units 49,
+  animals 32, walkable 11705, trees 159 (147 map + 12 demo), storeTrunks 30, storeTimber 20; events
+  worker-assigned 9, delivery-assigned 143, ware-delivered 143, chop-plan 5, trunk-taken 13,
+  tree-fell 5, trunk-out 5, timber-out 13; final trunksProduced 5, trunksTaken 13, timberProduced
+  13, treesFelled 5, timberDelivered 45, storeTimber 30, sawmillTimber 6, hutTrunks 5,
+  rngState 619533300. The carpenter's cycle measures exactly 361 ticks (timber-out at 453/814/1175).
+- Accepted v0 divergences (documented in module headers): carpenter cycle frozen at 361 ticks (the
+  as-coded stay pattern measures 358 — a future parity task); goIn/goOut = 1 tick; logistics
+  matching rule per §2.7; footprint from the hardcoded PlanYX per the §2.2 errata.
