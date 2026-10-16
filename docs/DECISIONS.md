@@ -2,6 +2,21 @@
 
 Newest first. Only decisions the lead/owner actually made, with evidence.
 
+## 2026-10-17 — Owner directive: play vs the Advanced AI on real maps
+
+- Maxim (empire chat, verbatim): "mm can u integrate there advanced ai from C:\Users\me\Desktop\
+  KaM Remake\KaM Remake Beta r15472 for the one we doing i want to play vs advanced ai and maps".
+- Read: the target experience is a skirmish game — pick a map from the owner's own install and play
+  against the Remake's **Advanced AI** (`src/ai/newAI/**`), not the classic AI and not a simplified
+  placeholder. The advanced AI is a first-class port target; map loading for the install's own
+  `Maps/` + `MapsMP/` folders (356 maps, standard + Remake formats, each with its mission `.dat`)
+  becomes its own milestone so every later slice is tested on real maps.
+- Ladder updated in `docs/PLAN.md`: M3 economy (running) → **M3b any-map + picker** → M4 combat →
+  **M5 advanced AI** → M6 multiplayer. Nothing dropped; M5's "may start simplified" wording is
+  replaced by the real newAI as the deliverable.
+- Logged here for the same reason as the 2026-10-16 directive: kam-web is not a center loop (no
+  `owner.mjs` verb logs a non-loop repo order); this file is the project's log.
+
 ## 2026-10-16 — M2b accepted: deterministic sim core + playable slice (workers C + D)
 
 - Worker C (sim core, headless) verified by the lead: `WALK CHECK PASS` (walkable 11883/16129),

@@ -57,12 +57,29 @@ later; CRC per tick; mismatch → pause + resync. **LAN** = the relay run on the
   **M2b (sim core: tick loop, pathfinding, click-to-move) next** — the harness is its parity
   instrument; this is the **first playable slice** (units walk the real map on click). Contract:
   `docs/M2B-SPIKE.md` (frozen 2026-10-16; workers C sim core + D playable viewer).
-- **M3 economy slice**: one production chain end-to-end (forest → sawmill → boards), serfs.
+- **M3 economy slice** (IN PROGRESS 2026-10-17): one production chain end-to-end (forest → sawmill →
+  boards), serfs. Contract `docs/M3-SPIKE.md` (frozen 2026-10-17; workers E sim core + F viewer).
+- **M3b any-map + picker** (owner priority 2026-10-17): load any map from the install's `Maps/` and
+  `MapsMP/` folders (standard + Remake formats) with its mission `.dat`, plus a map picker UI.
 - **M4 combat slice**: warriors, houses HP, projectiles, fog of war.
-- **M5 skirmish AI**: ported AI mayor/general (may start simplified, same interfaces).
+- **M5 advanced AI** (owner priority 2026-10-17): port the Remake's **Advanced AI**
+  (`src/ai/newAI/**` — Eye/CityPlanner/CityBuilder/ArmyPlanner/…), not the classic AI and not a
+  placeholder; mission-script AI settings (`!SET_AI_CHARACTER`/`DEFENSE`/`ATTACK`/…) honoured.
 - **M6 multiplayer**: relay + lobby + lockstep + resync; two browsers finish one match. ("the
   Chrono Divide bar")
 - **M7 parity extras**: mission scripts/campaigns, replays, map editor, mods, mobile, quick match.
+
+## Owner priority (2026-10-17)
+
+Verbatim (empire chat): "mm can u integrate there advanced ai from C:\Users\me\Desktop\KaM Remake\
+KaM Remake Beta r15472 for the one we doing i want to play vs advanced ai and maps".
+
+Read: the target experience is a **skirmish game — pick a real map, play against the Remake's
+Advanced AI**. Consequences for the ladder: the advanced AI (`src/ai/newAI/**`) is the M5
+deliverable (the earlier "may start simplified" wording is dropped); map loading for the install's
+own maps becomes its own milestone (M3b) so every later slice is tested on real maps; nothing is
+re-scoped away. Order: M3 → M3b → M4 → M5 → M6. The AI needs M3's economy and M4's combat as its
+substrate (its planners build houses/roads and command armies).
 
 ## Risks (top)
 
