@@ -1,0 +1,19 @@
+{
+  "name": "kam-web",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "description": "Unofficial web port of KaM Remake (Knights and Merchants) - browser client, TypeScript + WebGL2",
+  "license": "AGPL-3.0-or-later",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "import": "node tools/import/cli.ts",
+    "serve": "node apps/web/serve.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "typescript": "^7.0.2"
+  }
+}
