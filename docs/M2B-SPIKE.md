@@ -126,7 +126,12 @@ here so M2c parity work starts from the right skeleton.
   (62–65), `MoveY` i32 (66–69). Loop offset in sprite block = `((action−120)*8 + (dir−1))*70`;
   actions `uaWalk=120 … uaUnknown=133` (KM_Defaults.pas:731–734); dirs `dirN=1 … dirNW=8` (KM_Points.pas:8).
 - Frame (KM_ResInterpolation.pas:80–98): `step := AnimStep mod Count + 1; spriteId := Step[step]`
-  (stored ids are 0-based; the renderer uses `+1`). Atlas `i` = stored value — worker D verifies visually.
+  (stored ids are 0-based; the renderer uses `+1`). Atlas `i` = stored value — verified by the lead
+  2026-10-16: game sprite ids are 1-based (`KM_ResSprites.pas:780` `aStartingIndex = 1`) and atlas `i`
+  is the 0-based rxx file ordinal, so `atlas i = game render id − 1` (units `i = stored step`; terrain
+  `i = terrain`, the same convention — M1 errata in DECISIONS.md). D's first cut used `stored + 1`; the
+  lead corrected it (proof `%TEMP%\opencode\kamweb_unit_align_0_6.png`: `i = step` is a coherent
+  8-frame walk cycle, `i = step + 1` wraps to a foreign sprite).
   Still frame: `Step[(UNIT_STILL_FRAMES[dir] mod Count) + 1]` with `UNIT_STILL_FRAMES` =
   `(NA 0, N 3, NE 2, E 2, SE 1, S 6, SW 7, W 6, NW 6)` (ResUnits 181). `AnimStep` advances once per moved tick.
 
@@ -237,4 +242,60 @@ Worker D may not modify `packages/sim/*` — interface problems go back to the l
 
 ## 7. Acceptance record
 
-(filled by the lead at acceptance)
+### 7.1 Worker C — sim core: accepted (lead re-ran every proof)
+
+- `node tools/walksim/cli.ts --check` → `WALK CHECK PASS` (exit 0): walkable=11883/16129, unit.dat
+  339498 B / 41 records, speeds Serf=24 Militia=24 Scout=40 Knight=40 Vagabond=40 Wolf=39 (mounted
+  21/22/27 patched 39→40), mapelem.dat 25146 B = 254 records / 256 entries, tiles.json 597,
+  spawns (64,64)/(63,63)/(64,63); route table frozen below.
+- `npm test` → `tests 41 / pass 41 / fail 0` (exit 0); `npx tsc --noEmit` → exit 0.
+- Lead's independent passability check (`%TEMP%\opencode\kamweb_m2b_leadcheck.mjs`, own parsers, no
+  repo imports) vs C's grid (`%TEMP%\opencode\kamweb_m2b_leadverify.mjs`, C's modules): both walkable
+  **11883/16129** and both grids sha256
+  **556bfcb14a117834c62279bbdbc04afec5f67454ec41247d30afd2c8120ad3c1** (byte-identical 127×127 dump).
+  Probes: (115,64)/(114,65) blocked by obj 61, (115,65) walkable, (89,25) terrain-blocked,
+  (65,66)/(70,66) walkable, (60,66) not.
+- Accepted deviation: `mapelem.dat` is 254 records on disk (25146 B) with 256 parser entries —
+  §3's "255 entries" corrected in the module header (gMapElements[0..255], OBJ_NONE=255).
+
+Frozen route table (`--routes`):
+
+| name | from→to | unit | steps | ortho | diag | cost | moves | directTicks | simTicks | dir | end |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| long-water | (64,63)→(32,120) | 0 | 82 | 75 | 7 | 848 | 848 | 849 | 850 | 5 | (32,120) |
+| blocked-target | (64,63)→(89,25) | — | terrain 187 not walkable, path=null | | | | | | | | |
+| forced-diagonal | (114,64)→(115,65) | 0 | 1 | 0 | 1 | 14 | 14 | 15 | 16 | 4 | (115,65) |
+| equal-length-metric | (32,40)→(34,40) | 0 | 2 | 2 | 0 | 20 | 20 | 21 | 22 | 3 | (34,40) |
+| diag-shortcut | (20,20)→(22,22) | 0 | 2 | 0 | 2 | 28 | 28 | 29 | 30 | 4 | (22,22) |
+
+Tick accounting: `moves` = movement ticks (AnimStep++), `directTicks` = startWalk+walkTick loop
+(moves+1, arrival-recognition tick), `simTicks` = via `Sim.orderWalk` (moves+2: order applies at the
+end of tick 1, movement starts tick 2).
+
+### 7.2 Worker D — playable viewer: accepted after the lead's sprite-index fix
+
+- D's CDP journey re-run by the lead on the fixed build (`%TEMP%\opencode\kamweb_d_verify.mjs`, fresh
+  headless Edge against a live server): **RESULT PASS pass=16 fail=0** — `#err` empty, 3 units drawn,
+  missingSprites=0, tick pacing 10/s, left-click selects uid 1, HUD `tick=13 units=3 selected=1`,
+  right-click (53,61) (12-node route) → walked (112 walking samples), arrived snapped on the tile,
+  arrival **124 ticks = simTicks**, wheel zoom, 0 blocked requests, no page exceptions; screenshot
+  `%TEMP%\opencode\kamweb_m2b_shot.png`.
+- Accounting fix by the lead in the verify script: `expected = moves + 2` (simTicks), browser tolerance
+  ±2 (CDP dispatch + 100 ms poll quantization); the exact deterministic tick count is proven by
+  `tools/walksim` (headless). `npx tsc --noEmit` exit 0; `node apps/web/serve.ts --check` →
+  `SERVE CHECK PASS` (D's report).
+- Lead fix in D's file (errata, not a re-dispatch): `apps/web/play.ts` terrain `i = terrain`,
+  `SPRITE_ID_ADD = 0` (see §2.7); terrain rendering visually confirmed — grass/dirt/rock/water/abyss
+  all correct, no wrong-sprite speckles (screenshot reviewed).
+
+### 7.3 Regressions (lead, all exit 0)
+
+- M0: `node tools/import/cli.ts --install "C:\Users\me\Desktop\KaM Remake" --check` → `CHECK PASS`
+  (packs=6 sprites=11962).
+- M1: `node tools/mapinfo/cli.ts "…\Town Tutorial.map" --check` → `MAP CHECK PASS`.
+- M2: `node tools/replayinfo/cli.ts …\autosave01\autosave01.rpl` → seed=1247813158, first check #2
+  t=4 rand=2135059644, K=12/84852, first fail #16 t=10 file=615217756 sim=1527758834, pairs
+  ok=51311 bad=33540, anomalies=0 (the §2.4 numbers).
+- M1 viewer re-verified after the off-by-one fix: `LEAD M1 VERIFY PASS (15 checks)` on a fresh server
+  (port 8126) + fresh screenshot `out/m1-lead-fit.png` (clean terrain). The stale 8124 server
+  (worker B era, old transpiled code) was left running untouched; verification used a fresh port.

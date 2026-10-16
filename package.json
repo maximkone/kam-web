@@ -14,7 +14,8 @@
     "replayinfo": "node tools/replayinfo/cli.ts",
     "rnginfo": "node tools/rnginfo/cli.ts",
     "synth": "node tools/synth/cli.ts",
-    "test": "node --test packages/sim/rng.test.ts packages/replay/rpl.test.ts",
+    "walksim": "node tools/walksim/cli.ts",
+    "test": "node --test packages/sim/rng.test.ts packages/sim/terrain.test.ts packages/sim/astar.test.ts packages/sim/walk.test.ts packages/sim/sim.test.ts packages/replay/rpl.test.ts",
     "serve": "node apps/web/serve.ts"
   },
   "devDependencies": {

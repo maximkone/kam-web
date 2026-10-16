@@ -2,6 +2,21 @@
 
 Newest first. Only decisions the lead/owner actually made, with evidence.
 
+## 2026-10-16 — M2b accepted: deterministic sim core + playable slice (workers C + D)
+
+- Worker C (sim core, headless) verified by the lead: `WALK CHECK PASS` (walkable 11883/16129),
+  `npm test` 41/41, `npx tsc --noEmit` exit 0; C's passability grid is **byte-identical** to the
+  lead's independent checker (sha256 `556bfcb1…0ad3c1`); frozen route table in `docs/M2B-SPIKE.md`
+  §7.1. Accepted deviation: mapelem.dat = 254 records on disk / 256 parser entries (§3's "255" fixed).
+- Worker D (playable viewer) verified after the lead's sprite-index fix: CDP journey 16/16 — select,
+  right-click (53,61) (12-node route), arrival 124 ticks = simTicks, wheel zoom, 0 blocked requests,
+  no exceptions; `SERVE CHECK PASS`; record in `docs/M2B-SPIKE.md` §7.2.
+- Lead corrections during acceptance: (1) the terrain/unit sprite-index off-by-one (entry below);
+  (2) D's arrival-tick check accounting → `expected = simTicks = moves + 2`, browser tolerance ±2
+  (exact ticks are walksim's job).
+- Regressions re-run by the lead: M0 `CHECK PASS` · M1 `MAP CHECK PASS` + `LEAD M1 VERIFY PASS (15)`
+  · M2 autosave01 exact §2.4 numbers. Next on the ladder: M3 economy (per `docs/PLAN.md`).
+
 ## 2026-10-16 — M1 errata: terrain sprite index off-by-one (caught during M2b, fixed)
 
 - The M1 viewer (and M1's §2.3 wording) used atlas entry `i = terrain+1`; the correct entry is

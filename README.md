@@ -18,10 +18,12 @@ Chrono Divide does for Red Alert 2.
   structural round-trip, chain verifier (seed recovery + K prefix + sim-draw pair stats) on 6 real
   r15472 replays, `.rng` draw-trace oracle, synthetic-replay cross-checks. `M2 INTEGRATION PASS
   (97 checks)` — acceptance record in `docs/M2-SPIKE.md` §7, proofs in the M2 commit body.
-- **M2b — playable slice v0: IN PROGRESS** (spec frozen 2026-10-16, `docs/M2B-SPIKE.md`). Fixed tick
-  loop in the frozen §2.3 order, AStarNew pathfinding port (shipped default), click-to-move; workers
-  C (sim core) + D (playable viewer) building. The harness and the `.rng` oracle stay the parity
-  instruments (K grows with the sim).
+- **M2b — playable slice v0: DONE** (accepted 2026-10-16). Fixed tick loop in the frozen §2.3 order,
+  AStarNew pathfinding port (shipped default), walk kinematics, click-to-move playable viewer at
+  `/play.html`; workers C (sim core) + D (playable viewer). Lead-verified: `WALK CHECK PASS` + grid
+  sha256 identical to the lead's independent checker, CDP journey 16/16, `npm test` 41/41; acceptance
+  record in `docs/M2B-SPIKE.md` §7 (includes the lead's sprite-index off-by-one errata fix).
+  The harness and the `.rng` oracle stay the parity instruments (K grows with the sim).
 
 ## Quickstart (Windows, Node >= 24)
 
@@ -47,7 +49,7 @@ apps/web/          browser client (serve.ts; demo.ts sprite viewer, mapdemo.ts t
                    play.ts playable slice — M2b)
 packages/assets/   rxx decoder, PNG encoder, atlas packer; defines parsers (tiles/mapelem/unit — M2b)
 packages/map/      .map parser (M1)
-packages/sim/      exact KaM RNG port (M2a) + sim core: passability, AStarNew, walk, tick (M2b, in progress)
+packages/sim/      exact KaM RNG port (M2a) + sim core: passability, AStarNew, walk, tick (M2b)
 packages/replay/   .rpl codec, command ordinals, chain verifier (M2a)
 tools/import/      CLI: install -> out/atlas
 tools/mapinfo/     CLI: .map -> out/maps (M1)
