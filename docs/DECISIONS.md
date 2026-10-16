@@ -2,6 +2,20 @@
 
 Newest first. Only decisions the lead/owner actually made, with evidence.
 
+## 2026-10-16 — M1 parser accepted (worker A) — proofs re-run by the lead
+
+- `node tools/mapinfo/cli.ts "…\Town Tutorial\Town Tutorial.map" --check` → `MAP CHECK PASS`
+  (17/17 frozen values, exit 0, re-run by the lead).
+- `--export out/maps/verify.json` → SHA256 identical to the frozen `out/maps/TownTutorial.json`
+  (`0B7E2853…D2D6A754`), re-checked by the lead.
+- Battle Tutorial `64x64 terrain=55 height=0..100 obj=610 tail=6310`; Gameplay/Cross tail=3286.
+- Correction to the M1 spec (lead): the Remake-format revision string length is **u16**, not u32
+  (`TKMemoryStreamBinary.ReadW` reads a Word). Verified on a real Remake-format map in the
+  nested beta install (`KaM Remake Beta r15472\Tutorials\Town Tutorial\Town Tutorial.map`):
+  header `i32 0 | u16 6 "r14281" | u32 147456 | 128 128`, 9 bytes/tile — parses, exit 0.
+- Finding for later: the nested beta install holds 356 Remake-format maps (of 767) — a second
+  real test corpus for M1.5+ (tile layers / 9-byte tile format), listed by worker A.
+
 ## 2026-10-16 — M0 accepted (lead) — proofs in commit body
 
 - Converter (worker A): `packages/assets/{rxx,png,atlas}.ts` + `tools/import/cli.ts`; `--check`

@@ -17,7 +17,7 @@ Load a real KaM `.map` from the owner's install, expose it as browser data, and 
 
 ### 2.1 `.map` container (standard KaM format)
 
-- Header: `i32 mapX`, `i32 mapY` (mapX ≥ 1 → standard format). Remake format: first `i32` = 0, then UnicodeString (`u32 len` + UTF-16LE chars), `u32 mapDataSize`, `i32 mapX`, `i32 mapY` (`KM_Utils.pas` `LoadMapHeader`). M1 target maps are standard format.
+- Header: `i32 mapX`, `i32 mapY` (mapX ≥ 1 → standard format). Remake format: first `i32` = 0, then UnicodeString (`u16 len` + UTF-16LE chars; `KM_CommonClasses.pas` `ReadW` reads a Word — the first draft of this spec said u32, the source and 356 real Remake-format maps in the owner's nested beta install say u16), `u32 mapDataSize`, `i32 mapX`, `i32 mapY` (`KM_Utils.pas` `LoadMapHeader`). M1 target maps are standard format; Remake-format files parse (header + skip tiles) but tile content is not decoded (see 3.1).
 - Tiles: `mapX*mapY` records **23 bytes** each, row-major from (1,1):
   `byte0 terrain id (0..255)`, `byte1 unused`, `byte2 height (0..255)`, `byte3 rot (raw; use `rot & 3`; original maps have rot > 3)`, `byte4 unused`, `byte5 obj (255 = none, else 1..254 = mapelem.dat id)`, bytes 6..22 unused (17). Source: `KM_TerrainUtils.pas` `ReadTileFromStream` (KaM branch reads 6, seeks 17).
 - Tail after tiles: 22-byte resHead `{ u16 x1; i32 Allocated; i32 Qty1; i32 Qty2; i32 x5; i32 Len17 }`, then `17*Allocated` bytes, then optionally `ADDN`+`TILE` + `u32 size` + `u32 cypher` + `mapX*mapY` bytes (MapEd terrain kinds, i8). Source: `KM_TerrainPainter.pas` `LoadFromFile` lines 2041-2121.
