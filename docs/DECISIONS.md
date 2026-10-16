@@ -2,6 +2,27 @@
 
 Newest first. Only decisions the lead/owner actually made, with evidence.
 
+## 2026-10-16 — M2 scope frozen: replay-CRC parity harness (`docs/M2-SPIKE.md`)
+
+- M2 proof target redefined by the lead after ground-truth work: full desktop parity needs the sim,
+  so the honest M2 bar is a **chain verifier** on real `.rpl`s — recover the session seed backwards
+  from the first check, then report the matched-prefix **K** and per-pair sim-draw counts (`k − model0`).
+  Frozen on the 6 r15472 replays (one session): seed **1247813158** (all six), first check
+  `#2 t=4 rand=2135059644`, K=12, first fail `#16 t=10 file=615217756 sim=1527758834`, per-file pair
+  stats in §2.4 (`node %TEMP%\opencode\kamweb_chain_final.mjs <6 rpls>`, re-run by the lead).
+- RNG semantics corrected against `DBG_RNG_SPY` ground truth: `KaMRandom(MaxInt)` returns the raw
+  **post-step** state (stored Rand = state; the earlier "state−1" model was wrong); `step` = Schrage
+  Park–Miller (M = 2^31−1, A = 16807); seed recovery `seed = invStep^(ticks + draws + 1)(first check)`.
+- Draw schema frozen from source: `StoreCommand` writes the check on the **last** record of a group;
+  `ReplayTimer` = 1 top draw/tick + 1 draw per non-SKIP group compared at the group's last record;
+  SKIP set `{48,50,51,52,53,54}`; record-side tick order = sim UpdateStates → running timer → aggressive DoNothing.
+- Container/round-trip contract: `payloadLen = 16 + 22*(count+1)`; compressed-layer byte equality with
+  the original files is impossible (Node zlib ≠ Delphi zlib: 631306 vs 614624 B at level 9) — never claimed.
+- K=12 explanation (not a model bug): ticks 1..9 of this test map perform **zero** sim draws; the first
+  sim activity lands in tick 10 (8 draws) and tick 11 (39 draws). The M3+ sim is what makes K grow.
+- `.rng` trace numbers frozen as the oracle for M3 (`§2.5`): 175518 records, ticks 37803..40802,
+  chain 175517/175517 one-step, StoreCommand 6291.
+
 ## 2026-10-16 — M1 accepted: Town Tutorial renders in the browser (viewer = worker B)
 
 - Lead re-run, fresh headless Edge against the live dev server: **`LEAD M1 VERIFY PASS (15 checks)`**

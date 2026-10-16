@@ -5,7 +5,7 @@ Chrono Divide does for Red Alert 2.
 
 - Engine approach: **TypeScript + WebGL2**, simulation ported from the AGPL-3.0 source of
   KaM Remake (`reyandme/kam_remake`), assets imported from the player's own KaM install.
-- Full plan: `docs/PLAN.md` · newest spec: `docs/M1-SPIKE.md` · decision log: `docs/DECISIONS.md`.
+- Full plan: `docs/PLAN.md` · newest spec: `docs/M2-SPIKE.md` · decision log: `docs/DECISIONS.md`.
 
 ## Status
 
@@ -14,6 +14,10 @@ Chrono Divide does for Red Alert 2.
 - **M1 — map + terrain viewer: DONE** (accepted 2026-10-16). Real `.map` → terrain in the browser:
   corner heights, pan/zoom, tile HUD; `MAP CHECK PASS` + browser proofs in the M1 commit body,
   acceptance record in `docs/M1-SPIKE.md` §7.
+- **M2 — replay-CRC parity harness: IN PROGRESS** (spec frozen 2026-10-16, `docs/M2-SPIKE.md`).
+  Seed recovery + chain verification proven on 6 real r15472 replays (seed `1247813158`, K=12,
+  pair stats in the spec §2.4); `.rpl` codec + RNG port + verifier CLI and the `.rng` draw-trace
+  oracle are in dispatch. Next after that: the sim core, whose draw parity grows K toward the full file.
 
 ## Quickstart (Windows, Node >= 24)
 
