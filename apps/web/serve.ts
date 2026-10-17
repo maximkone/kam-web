@@ -60,7 +60,6 @@ const PLAY_MODULES = [
   'packages/sim/terrain.ts',
   'packages/sim/astar.ts',
   'packages/sim/walk.ts',
-  'packages/sim/sim.ts',
   'packages/sim/rng.ts',
   'packages/sim/economy.ts',
   'packages/sim/combat.ts',
@@ -189,7 +188,13 @@ function graphForModule(name: string): Graph | null {
 
 const server = createServer((req, res) => {
   const url = new URL(req.url ?? '/', 'http://127.0.0.1');
-  const path = decodeURIComponent(url.pathname);
+  let path: string;
+  try {
+    path = decodeURIComponent(url.pathname);
+  } catch {
+    send(res, 400, 'text/plain; charset=utf-8', 'bad request: malformed percent-encoding');
+    return;
+  }
 
   if (req.method !== 'GET' && req.method !== 'HEAD') {
     send(res, 405, 'text/plain; charset=utf-8', 'method not allowed');
