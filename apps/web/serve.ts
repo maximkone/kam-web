@@ -63,6 +63,7 @@ const PLAY_MODULES = [
   'packages/sim/sim.ts',
   'packages/sim/rng.ts',
   'packages/sim/economy.ts',
+  'packages/sim/combat.ts',
 ];
 
 // The terrain viewer's graph: mapdemo.ts + the shared browser map reader.
@@ -345,6 +346,7 @@ function check(): void {
     ['out/web/packages/assets/housedata.js', join(WEB_JS_DIR, 'packages', 'assets', 'housedata.js')],
     ['out/web/packages/assets/wares.js', join(WEB_JS_DIR, 'packages', 'assets', 'wares.js')],
     ['out/web/packages/sim/economy.js', join(WEB_JS_DIR, 'packages', 'sim', 'economy.js')],
+    ['out/web/packages/sim/combat.js', join(WEB_JS_DIR, 'packages', 'sim', 'combat.js')],
     // M3b: the viewer graphs + the shared browser map reader.
     ['out/web/apps/web/play.js', PLAY_OUT],
     ['out/web/apps/web/mapdemo.js', MAPDEMO_OUT],

@@ -192,4 +192,50 @@ default true) — deterministic but only affects member slot destinations; docum
 
 ## 7. Acceptance record
 
-(filled by the lead at acceptance)
+### 7.1 Worker I — combat sim: accepted
+
+- `node tools/combatsim/cli.ts --check` → `COMBAT CHECK PASS (900 ticks, 69 events)` (exit 0); two
+  runs identical sha256 `09a19821bab67969bad8d1e0e45d3aa3c026c7ee08119cb43927ee0f5c6a30a8`; perturbed
+  `expected.ts` → FAIL (exit 1); `--map MapsMP/Cross` deterministic (sha `a694d656…`).
+- Frozen numbers (Arena, 900 ticks): load `32x32 hands=7 houses=1 streets=2 units=20 warriors=13
+  house=hut#18@(16,28)`; events arrow-fired 26, fight-retarget 3, fow-drop 1, group-died 2,
+  house-destroyed 1, hp-decrease 24, kill-source 6, unit-killed 6; final meleeKills 4, rangedKills 2,
+  arrows 26/hits 13, fowDrops 1, houseDamage 250, rubble 2, unitsAlive 14, groupsAlive 4,
+  rngState 590275977.
+- `npm test` **98/98** (combat.test.ts wired in by the lead); `npx tsc --noEmit` exit 0.
+- **Crash found by worker J, reproduced by the lead, fixed by worker I**: economy tasks held house
+  *array indices* while destroyed houses were spliced out → `Cannot read properties of undefined
+  (reading 'entrance')` one tick after any demolish (repro `%TEMP%\opencode\kamweb_m4_sim_repro.mjs`).
+  Fix: all house references are uids (`houseByUid`, uid-keyed state map), deliveries abandon
+  gracefully (`ShouldAbandonDeliveryTo` semantics + a `delivery-abandoned` event), workers lose dead
+  homes and relocate, units inside a destroyed house are placed at the entrance, demands/offers are
+  pruned; the deletion contract is unchanged (the house leaves `world.houses` one tick after
+  Demolish). Regression test added (demolish mid-delivery, 300 ticks, no crash). All frozen numbers
+  and shas unchanged.
+- Accepted v0 divergences (I's flags): warrior tail runs before the inherited common tick (matches the
+  Pascal override); walk interaction/push not ported (the walk-arrival enemy check is what starts
+  melee fights); projectile flight length is flat; `MakeSound`'s RNG roll always drawn; Hungarian
+  reorder deferred; unwalkable-tile kill skipped; storm/split/link/repair/sounds/script events out.
+
+### 7.2 Worker J — combat viewer: accepted
+
+- `npx tsc --noEmit` exit 0; `SERVE CHECK PASS`; J's own CDP run **58/58** (FOW inside/outside +
+  toggle + hand switch; house fire levels + HUD HP; collapse → 4 rubble objects; scripted fight with
+  real clicks, arrows ≤6 in flight, 2 deaths; picker Arena/Atoll; tutorial reload) + the lead's M3b
+  script 21/21 against J's build.
+- Lead's independent CDP run (`%TEMP%\opencode\kamweb_m4_leadcdp.mjs`, live server on 8143):
+  **RESULT PASS pass=16 fail=0** — M3 counters hold; FOW 255 inside the hand-0 village / 0 far away /
+  toggles; `scriptedFight()` spawns 10 warriors in 4 groups; arrows seen in flight (max 6) and deaths
+  happen (59→56); a house loses HP (550→350) and **ticking 200 after the demolish shows no crash**
+  (the fixed bug path in the browser), the house leaves the world (21→20) and 4 rubble objects
+  appear; the economy keeps advancing afterwards (storeTrunks 30→20, events 39→470); Arena still
+  loads clean (M3b); 0 blocked requests; no page exceptions; screenshots.
+- Accepted deviations (J's flags): FOW uses `Revelation`/`checkVerticeRev` (the game's darkness
+  source), per-vertex + LINEAR, projectile hiding by containing tile; group condition is
+  viewer-derived; house fire anims parsed viewer-side; UI orders only the human hand's groups;
+  scanned maps stay static until `enableCombatWorld()`/`scriptedFight()`.
+
+### 7.3 Regressions (lead, all exit 0)
+
+M0 `CHECK PASS` · M1 `MAP CHECK PASS` · M2 §2.4 numbers · M2b `WALK CHECK PASS` · M3 `ECON CHECK
+PASS` (sha unchanged) · M3b `MAPSCAN CHECK PASS` · `npm test` 98/98 · `npx tsc --noEmit` exit 0.

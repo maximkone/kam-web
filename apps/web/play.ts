@@ -35,6 +35,19 @@
 //    with the fall object's non-looping steps; the animation start tick is the tick the viewer first
 //    saw the stump, so the fall anim can lag the sim by up to one tick.
 //
+// M4 (docs/M4-SPIKE.md section 5): the combat viewer. FOW dims the world by the human hand's
+// revelation (world.fow[hand], toggle key F; the render copy's RENDER_RADIUS_ADD = 5 is not
+// exposed by the frozen FogOfWar interface, so the sim revelation itself is drawn — the accepted
+// section 2.7 approximation). Warriors draw the uaWork fight loop (KM_UnitWarrior.pas:754) and the
+// uaDie sequence (KM_UnitTaskDie.pas:85-86); arrows/bolts/sling rocks draw the shooter's uaSpec
+// loop along the Paint() parabola (KM_Projectiles.pas:362-400, KM_RenderPool.pas:997-1036) and are
+// hidden under FOW exactly like the game (:1010-1011). Damaged houses draw the haFire1..8
+// sub-action sprites by damage level (KM_Houses.pas:1347-1363); a demolished house's rubble
+// objects (68 + KaMRandom(6), KM_Terrain.pas:4936) appear through the object scan. Click selects a
+// unit and its group; right-click orders walk / attack (enemy unit or house under the cursor)
+// through the frozen world.orderGroup. The M4 world API (groups/projectiles/fow/orderGroup/
+// damageHouse/unitHealth/groupOf, combat.ts + economy.ts) is used directly, typed by the sim.
+//
 // serve.ts transpiles this file together with the browser-safe modules it imports (one tsc run,
 // --rewriteRelativeImportExtensions): /apps/web/play.js + /packages/**/*.js.
 // ESM, zero runtime deps, imports keep the .ts extension (node/tsc) and become .js for the browser.
@@ -42,21 +55,23 @@
 import { parseTilesJson } from '../../packages/assets/tiledata.ts';
 import { parseMapElem } from '../../packages/assets/mapelem.ts';
 import { parseUnitDat, parseSerfCarry, walkLoop } from '../../packages/assets/unitdat.ts';
-import { parseHousesDat } from '../../packages/assets/housedata.ts';
+import { parseHousesDat, housePlan } from '../../packages/assets/housedata.ts';
 import { WARE_CNT, WARE_NAMES, WT_TRUNK, WT_TIMBER } from '../../packages/assets/wares.ts';
 import { parseMissionScript } from '../../packages/mission/mission.ts';
 import { createEconomyWorld, applyDemoScenario } from '../../packages/sim/economy.ts';
-import { tileWalkable } from '../../packages/sim/terrain.ts';
+import { buildPassGrid, tileWalkable } from '../../packages/sim/terrain.ts';
 import { findPath } from '../../packages/sim/astar.ts';
 import { startWalk, walkTick, walkSpeeds } from '../../packages/sim/walk.ts';
 import { parseMapBytes } from './mapread.ts';
+import { spawnGroup } from '../../packages/sim/combat.ts';
 import type { Walk } from '../../packages/sim/walk.ts';
 import type { PassGrid } from '../../packages/sim/terrain.ts';
 import type { TileFlags } from '../../packages/assets/tiledata.ts';
 import type { UnitSpec, AnimLoop } from '../../packages/assets/unitdat.ts';
 import type { HouseSpec } from '../../packages/assets/housedata.ts';
 import type { MapElem } from '../../packages/assets/mapelem.ts';
-import type { Mission } from '../../packages/mission/mission.ts';
+import type { Mission, MissionUnit } from '../../packages/mission/mission.ts';
+import type { FogOfWar, GroupState, SimProjectile } from '../../packages/sim/combat.ts';
 import type { EconomyWorld, EconHouse, EconUnit, SimEvent } from '../../packages/sim/economy.ts';
 import type { KaMap } from '../../packages/map/map.ts';
 import type { LoadedMap } from './mapread.ts';
@@ -138,6 +153,32 @@ const HOUSES_DAT_RECORD = 1688;
 const MAPELEM_RECORD = 99;
 const SERF_CARRY_DIRS = 8;
 
+// ---- M4 constants (docs/M4-SPIKE.md sections 2.2, 2.3, 2.5, 2.7) -------------
+const UA_WORK = 1;  // anim index of uaWork (121 − 120): the fight loop (KM_UnitWarrior.pas:754)
+const UA_SPEC = 2;  // uaSpec (122 − 120): the projectile sprite loop (KM_RenderPool.pas:1015-1018)
+const UA_DIE = 3;   // uaDie (123 − 120): the death sequence (KM_UnitTaskDie.pas:85-86)
+const UT_SWORDFIGHTER = 16; // UNIT_ID_TO_TYPE records (KM_ResUnits.pas:146-157)
+const UT_BOWMAN = 17;
+const UT_CROSSBOWMAN = 18;
+const UT_ROGUE = 25;
+// PROJECTILE_ARC base curve per kind (KM_Projectiles.pas:71; the sim owns the RNG jitter part).
+const PROJECTILE_ARC: Record<string, number> = { arrow: 1.6, bolt: 1.4, stone: 2.5 };
+// AddHouseRemainder writes 68 + KaMRandom(6) (KM_Terrain.pas:4936).
+const RUBBLE_OBJS = new Set([68, 69, 70, 71, 72, 73]);
+const HOUSE_ANIM_BASE = 88;   // houses.dat record: Anim[haWork1..] at +88 (housedata.ts header)
+const HOUSE_ANIM_LOOP = 70;
+const HA_FIRE1 = 11;          // TKMHouseActionType haFire1 (KM_Defaults.pas:768)
+const FIRE_COUNT = 8;
+const FOW_HIDE_AT = 128;      // projectile render skip: CheckRevelation <= 128 (KM_RenderPool.pas:1011)
+const HUMAN_HAND_FALLBACK = 0; // mission.humanPlayer fallback (M3 spec 2.1: hand 0 is the human)
+
+// ---- M4 combat types (docs/M4-SPIKE.md section 3) ---------------------------
+// The sim's own types (packages/sim/combat.ts landed); the viewer reads the frozen world API
+// directly. `FowPointRev` only probes the optional point-revelation helper beyond section 3.
+interface FowPointRev {
+  checkRev?(x: number, y: number): number;
+}
+
 const cv = document.getElementById('cv') as HTMLCanvasElement;
 const hud = document.getElementById('hud') as HTMLDivElement;
 const errBox = document.getElementById('err') as HTMLDivElement;
@@ -145,7 +186,9 @@ const gl = cv.getContext('webgl2', { alpha: false });
 if (gl === null) throw new Error('webgl2 unavailable');
 
 // ---- shader programs --------------------------------------------------------
-// Terrain: position + UV from the VBO, camera uniform only (M1 mapdemo).
+// Terrain: position + UV from the VBO, camera uniform only (M1 mapdemo). M4: the FOW texture
+// (per-vertex revelation, the game's RenderFOW multiply — KM_RenderTerrain.pas:1052-1119) darkens
+// every fragment by rev/255; uFowOn = 0 skips it (toggle key F).
 const TERRAIN_VS = `#version 300 es
 in vec2 aPos;        // world px
 in vec2 aUV;         // atlas UV
@@ -153,20 +196,36 @@ uniform vec2 uCam;   // world px at the viewport centre
 uniform float uZoom; // css px per world px
 uniform vec2 uView;  // viewport, css px
 out vec2 vUV;
+out vec2 vWorld;     // world px (FOW sampling)
 void main() {
   vec2 css = (aPos - uCam) * uZoom + uView * 0.5;
   gl_Position = vec4(css.x / uView.x * 2.0 - 1.0, 1.0 - css.y / uView.y * 2.0, 0.0, 1.0);
   vUV = aUV;
+  vWorld = aPos;
 }`;
 const TERRAIN_FS = `#version 300 es
 precision mediump float;
 in vec2 vUV;
+in vec2 vWorld;
 uniform sampler2D uTex;
+uniform sampler2D uFow;    // vertex revelation grid, mapX x mapY
+uniform float uFowOn;
+uniform vec2 uMapCells;    // mapX, mapY (vertex grid size)
+uniform float uCell;       // CELL_SIZE_PX
 out vec4 outColor;
-void main() { outColor = texture(uTex, vUV); }`;
+void main() {
+  vec4 c = texture(uTex, vUV);
+  if (uFowOn > 0.5) {
+    vec2 fuv = (vWorld / uCell + 0.5) / uMapCells;
+    c.rgb *= texture(uFow, fuv).r;
+  }
+  outColor = c;
+}`;
 
 // Sprites + selection ring: one 0..1 quad, world top-left + size, sheet rect UVs, optional
 // team tint through the mask sheet (mask byte = alpha, RGB red; packages/assets/atlas.ts).
+// M4: the same FOW multiply per fragment (the game draws sprites, then multiplies the FOW
+// texture over the whole scene — KM_RenderTerrain.pas:1072).
 const SPRITE_VS = `#version 300 es
 in vec2 aPos;        // 0..1 quad
 uniform vec2 uCam;
@@ -175,14 +234,18 @@ uniform vec2 uView;
 uniform vec2 uWorld; // quad top-left, world px
 uniform vec2 uSize;  // quad size, world px
 out vec2 vPos;
+out vec2 vWorld;
 void main() {
-  vec2 css = (uWorld + aPos * uSize - uCam) * uZoom + uView * 0.5;
+  vec2 w = uWorld + aPos * uSize;
+  vec2 css = (w - uCam) * uZoom + uView * 0.5;
   gl_Position = vec4(css.x / uView.x * 2.0 - 1.0, 1.0 - css.y / uView.y * 2.0, 0.0, 1.0);
   vPos = aPos;
+  vWorld = w;
 }`;
 const SPRITE_FS = `#version 300 es
 precision mediump float;
 in vec2 vPos;
+in vec2 vWorld;
 uniform sampler2D uTex;
 uniform vec4 uRect;     // sprite rect in its sheet, px (x,y,w,h)
 uniform vec2 uSheet;    // sheet size, px
@@ -191,6 +254,10 @@ uniform vec4 uMaskRect; // mask rect in its mask sheet, px
 uniform vec2 uMaskSheet;
 uniform float uHasMask;
 uniform vec3 uTint;
+uniform sampler2D uFow; // vertex revelation grid, mapX x mapY
+uniform float uFowOn;
+uniform vec2 uMapCells;
+uniform float uCell;
 out vec4 outColor;
 void main() {
   vec2 uv = (uRect.xy + vPos * uRect.zw) / uSheet;
@@ -199,6 +266,10 @@ void main() {
     vec2 muv = (uMaskRect.xy + vPos * uMaskRect.zw) / uMaskSheet;
     float m = texture(uMaskTex, muv).a;
     c.rgb = mix(c.rgb, uTint, m);
+  }
+  if (uFowOn > 0.5) {
+    vec2 fuv = (vWorld / uCell + 0.5) / uMapCells;
+    c.rgb *= texture(uFow, fuv).r;
   }
   outColor = c;
 }`;
@@ -231,6 +302,10 @@ const uT = {
   zoom: gl.getUniformLocation(terrainProg, 'uZoom')!,
   view: gl.getUniformLocation(terrainProg, 'uView')!,
   tex: gl.getUniformLocation(terrainProg, 'uTex')!,
+  fow: gl.getUniformLocation(terrainProg, 'uFow')!,
+  fowOn: gl.getUniformLocation(terrainProg, 'uFowOn')!,
+  mapCells: gl.getUniformLocation(terrainProg, 'uMapCells')!,
+  cell: gl.getUniformLocation(terrainProg, 'uCell')!,
 };
 const uS = {
   cam: gl.getUniformLocation(spriteProg, 'uCam')!,
@@ -246,6 +321,10 @@ const uS = {
   maskSheet: gl.getUniformLocation(spriteProg, 'uMaskSheet')!,
   hasMask: gl.getUniformLocation(spriteProg, 'uHasMask')!,
   tint: gl.getUniformLocation(spriteProg, 'uTint')!,
+  fow: gl.getUniformLocation(spriteProg, 'uFow')!,
+  fowOn: gl.getUniformLocation(spriteProg, 'uFowOn')!,
+  mapCells: gl.getUniformLocation(spriteProg, 'uMapCells')!,
+  cell: gl.getUniformLocation(spriteProg, 'uCell')!,
 };
 
 gl.enable(gl.BLEND);
@@ -318,7 +397,22 @@ let speedCache: Map<number, { ortho: number; diag: number }> = new Map();
 
 let selectedUid = 0;
 let selectedHouseUid = 0;
-let frameStats = { frames: 0, unitsDrawn: 0, housesDrawn: 0, objectsDrawn: 0, missingSprites: 0 };
+let frameStats = { frames: 0, unitsDrawn: 0, housesDrawn: 0, objectsDrawn: 0, projectilesDrawn: 0, missingSprites: 0 };
+
+// M4 combat viewer state: the FOW toggle/hand, the revelation texture (vertex grid), the selected
+// group, the fire-anim table and the KaMap of the current page (for the scripted-fight rebuild).
+let fowOn = true;             // spec 2.7 toggle (key F)
+let fowHand = HUMAN_HAND_FALLBACK; // the human hand's revelation (mission.humanPlayer when known)
+let fowTex: WebGLTexture | null = null;
+let fowTexW = 0;
+let fowTexH = 0;
+let fowPixels: Uint8Array | null = null;
+let fowDirtyTick = -1;
+let currentKaMap: KaMap | null = null;
+let selectedGroupUid = 0;
+let houseFireAnims: AnimLoop[][] = []; // per script id, [haFire1..8] loops (viewer parse, like supply)
+let projectileDrawCount = 0;
+let projectileScreens: { uid: number; kind: string; x: number; y: number; w: number; h: number }[] = [];
 
 let quadVao: WebGLVertexArrayObject | null = null;
 let ringTex: WebGLTexture | null = null;
@@ -441,6 +535,221 @@ function parseSupplyTables(buf: Uint8Array): { in: Int16Array[]; out: Int16Array
     }
   }
   return { in: inT, out: outT };
+}
+
+function readI32(buf: Uint8Array, o: number): number {
+  return buf[o]! | (buf[o + 1]! << 8) | (buf[o + 2]! << 16) | (buf[o + 3]! << 24);
+}
+
+/**
+ * houses.dat Anim[haFire1..haFire8] loops (TKMHouseActionType 11..18, KM_Defaults.pas:764-768):
+ * record Anim at +88, 19 loops of 70 B (housedata.ts header). Viewer-side like the supply tables —
+ * the frozen HouseSpec does not carry the house animations.
+ */
+function parseHouseFireAnims(buf: Uint8Array): AnimLoop[][] {
+  const out: AnimLoop[][] = [];
+  for (let i = 0; i < HOUSE_ID_TO_TYPE.length; i++) out.push([]);
+  for (let slot = 0; slot < 29; slot++) {
+    const b = HOUSES_DAT_HEAD + slot * HOUSES_DAT_RECORD;
+    if (b + HOUSES_DAT_RECORD > buf.length) break;
+    const loops: AnimLoop[] = [];
+    for (let k = 0; k < FIRE_COUNT; k++) {
+      const o = b + HOUSE_ANIM_BASE + (HA_FIRE1 + k) * HOUSE_ANIM_LOOP;
+      const steps = new Int16Array(30);
+      for (let s = 0; s < 30; s++) steps[s] = readI16(buf, o + s * 2);
+      loops.push({ steps, count: readI16(buf, o + 60), moveX: readI32(buf, o + 62), moveY: readI32(buf, o + 66) });
+    }
+    out[slot] = loops;
+  }
+  return out;
+}
+
+// ---- M4 combat helpers (docs/M4-SPIKE.md section 3) -------------------------
+/** Fight state of a unit: 'none' | 'fight' | 'die' (the frozen EconUnit field). */
+function fightStateOf(u: EconUnit): 'none' | 'fight' | 'die' {
+  return u.fightState === 'fight' || u.fightState === 'die' ? u.fightState : 'none';
+}
+
+function isDeadUnit(u: EconUnit): boolean {
+  return u.dead === true;
+}
+
+function unitHitPoints(u: EconUnit): number | null {
+  if (world === null) return null; // static mode: no sim health to show
+  return Number.isFinite(u.hitPoints) ? u.hitPoints : null;
+}
+
+/** The human hand (mission.humanPlayer; hand 0 in the tutorial and Arena — M3 spec 2.1). */
+function humanHand(): number {
+  const m = mission;
+  return m !== null && Number.isInteger(m.humanPlayer) && m.humanPlayer >= 0 ? m.humanPlayer : HUMAN_HAND_FALLBACK;
+}
+
+function fowOf(hand: number): FogOfWar | null {
+  if (world === null) return null;
+  const f = world.fow[hand];
+  return f === undefined || f === null ? null : f;
+}
+
+/** Tile revelation (1-based tile, 0..255); -1 when the sim has no FOW for the hand. */
+function fowTileRev(x: number, y: number): number {
+  const f = fowOf(fowHand);
+  if (f === null) return -1;
+  const v = f.checkTileRev(x, y);
+  return typeof v === 'number' && Number.isFinite(v) ? v : -1;
+}
+
+function fowVertRev(x: number, y: number): number {
+  const f = fowOf(fowHand);
+  if (f === null) return -1;
+  const v = f.checkVerticeRev(x, y);
+  return typeof v === 'number' && Number.isFinite(v) ? v : -1;
+}
+
+/**
+ * Revelation at a world-px point: the game's CheckRevelation (KM_FogOfWar.pas:478-498, tile-space
+ * point) when the sim exposes it, else the containing tile's revelation (accepted approximation,
+ * spec 2.7). -1 when FOW is unavailable.
+ */
+function fowRevAtWorld(wx: number, wy: number): number {
+  const f = fowOf(fowHand);
+  if (f === null) return -1;
+  const probe = f as unknown as FowPointRev;
+  if (typeof probe.checkRev === 'function') {
+    const v = probe.checkRev(wx / CELL, wy / CELL);
+    if (typeof v === 'number' && Number.isFinite(v)) return v;
+  }
+  return fowTileRev(Math.floor(wx / CELL) + 1, Math.floor(wy / CELL) + 1);
+}
+
+/**
+ * Rebuild the per-vertex revelation texture when the sim tick changed (the game's RenderFOW
+ * multiplies the scene by Revelation/255; vertex grid mapX x mapY — KM_RenderTerrain.pas:1076-1119).
+ */
+function updateFowTexture(): void {
+  if (map === null) return;
+  const f = fowOf(fowHand);
+  const active = fowOn && f !== null;
+  if (!active) return;
+  const w = map.mapX;
+  const h = map.mapY;
+  const tick = world === null ? 0 : world.tickCount;
+  if (fowTex !== null && fowTexW === w && fowTexH === h && fowDirtyTick === tick) return;
+  if (fowTex === null || fowTexW !== w || fowTexH !== h) {
+    if (fowTex !== null) gl!.deleteTexture(fowTex);
+    fowTex = gl!.createTexture()!;
+    fowTexW = w;
+    fowTexH = h;
+    fowPixels = new Uint8Array(w * h);
+    fowDirtyTick = -1;
+  }
+  const px = fowPixels!;
+  for (let vy = 0; vy < h; vy++) {
+    for (let vx = 0; vx < w; vx++) {
+      const v = f.checkVerticeRev(vx, vy);
+      px[vy * w + vx] = typeof v === 'number' && Number.isFinite(v) ? Math.max(0, Math.min(255, Math.round(v))) : 0;
+    }
+  }
+  gl!.bindTexture(gl!.TEXTURE_2D, fowTex);
+  gl!.pixelStorei(gl!.UNPACK_ALIGNMENT, 1);
+  gl!.texImage2D(gl!.TEXTURE_2D, 0, gl!.R8, w, h, 0, gl!.RED, gl!.UNSIGNED_BYTE, px);
+  gl!.texParameteri(gl!.TEXTURE_2D, gl!.TEXTURE_MIN_FILTER, gl!.LINEAR);
+  gl!.texParameteri(gl!.TEXTURE_2D, gl!.TEXTURE_MAG_FILTER, gl!.LINEAR);
+  gl!.texParameteri(gl!.TEXTURE_2D, gl!.TEXTURE_WRAP_S, gl!.CLAMP_TO_EDGE);
+  gl!.texParameteri(gl!.TEXTURE_2D, gl!.TEXTURE_WRAP_T, gl!.CLAMP_TO_EDGE);
+  fowDirtyTick = tick;
+}
+
+/** Group uid of a unit: the frozen groupOf() first, the additive unit field as fallback. */
+function groupUidOf(uid: number): number {
+  if (world === null) return 0;
+  const g = world.groupOf(uid);
+  if (g !== null && g !== undefined && typeof g.uid === 'number') return g.uid;
+  const u = activeUnits().find((x) => x.uid === uid);
+  const gu = u === undefined ? 0 : u.groupUid;
+  return typeof gu === 'number' && gu > 0 ? gu : 0;
+}
+
+function selectedGroup(): GroupState | null {
+  if (selectedGroupUid === 0 || world === null) return null;
+  return world.groups.find((g) => g.uid === selectedGroupUid) ?? null;
+}
+
+/** Member units of a group that are still on the field (dead/closed units are skipped). */
+function groupMembers(g: GroupState): EconUnit[] {
+  const out: EconUnit[] = [];
+  for (const uid of g.memberUids) {
+    const u = activeUnits().find((x) => x.uid === uid);
+    if (u === undefined || isDeadUnit(u)) continue;
+    out.push(u);
+  }
+  return out;
+}
+
+/** Viewer-side group condition (the frozen SimGroup has no Condition field; KM_UnitGroup.pas:471). */
+function groupCondition(g: GroupState): string {
+  const members = groupMembers(g);
+  if (members.length === 0) return 'dead';
+  if (members.some((u) => fightStateOf(u) === 'fight')) return 'fighting';
+  if (g.order === 'walk') return 'walking';
+  if (g.order === 'attackUnit' || g.order === 'attackHouse') return 'attacking';
+  if (g.order === 'halt') return 'halted';
+  return 'idle';
+}
+
+/** House health: MaxHealth − fDamage (KM_Houses.pas:1173-1176); null in static mode. */
+function houseHealthOf(h: EconHouse): number | null {
+  if (world === null) return null;
+  if (Number.isFinite(h.maxHealth) && Number.isFinite(h.damage)) return Math.max(0, h.maxHealth - h.damage);
+  return null;
+}
+
+/** A demolished house (the sim deletes it from world.houses a tick later). */
+function houseDestroyed(h: EconHouse): boolean {
+  return h.destroyed === true;
+}
+
+/**
+ * Fire sub-actions by damage level: dmgLevel = MaxHealth div 8; fire k shows when
+ * fDamage > (k-1)*dmgLevel (KM_Houses.pas:1347-1363, complete houses only — v0 has none under
+ * construction). The sim's own fireLevel wins; else derived from the house health.
+ */
+function houseFireCount(h: EconHouse): number {
+  if (Number.isFinite(h.fireLevel)) return Math.max(0, Math.min(FIRE_COUNT, Math.round(h.fireLevel)));
+  const spec = houseSpecs[h.typeId];
+  const health = houseHealthOf(h);
+  if (spec === undefined || health === null) return 0;
+  const dmg = Math.max(0, spec.maxHealth - health);
+  if (dmg <= 0) return 0;
+  const level = Math.floor(spec.maxHealth / 8);
+  if (level <= 0) return FIRE_COUNT;
+  let n = 0;
+  for (let k = 1; k <= FIRE_COUNT; k++) if (dmg > (k - 1) * level) n = k;
+  return n;
+}
+
+/** KMGetDirection(FromPos, ToPos) (KM_Points.pas:835-867): 8-way direction from a delta. */
+function dirFromDelta(dx: number, dy: number): number {
+  if (dx === 0 && dy === 0) return 1;
+  const distSqr = dx * dx + dy * dy;
+  const ang = Math.atan2(dy / distSqr, dx / distSqr);
+  return Math.round((((ang + Math.PI / 2) / Math.PI) * 180 + 3600 + 22.5) % 360 / 45) + 1;
+}
+
+/**
+ * Projectile sprite: the shooter's uaSpec loop at trunc(pct*(count-1)) (the game's
+ * UnitActionByPercent with interpolation disabled — KM_ResInterpolation.pas:101-109).
+ */
+function projectileSprite(kind: SimProjectile['kind'], dir: number, pct: number): AtlasSprite | undefined {
+  const rec = kind === 'bolt' ? UT_CROSSBOWMAN : kind === 'stone' ? UT_ROGUE : UT_BOWMAN;
+  const spec = specs[rec];
+  if (spec === undefined) return undefined;
+  const loop = spec.anim[UA_SPEC]?.[dir - 1];
+  if (loop === undefined || loop.count <= 0) return undefined;
+  const step = Math.min(loop.count - 1, Math.max(0, Math.trunc(pct * (loop.count - 1))));
+  const stored = loop.steps[step];
+  if (stored === undefined || stored < 0) return undefined;
+  return unitByI.get(stored);
 }
 
 // ---- terrain VBO (M1 renderer) ----------------------------------------------
@@ -827,6 +1136,7 @@ function drawSpriteIn(
     gl!.uniform2f(uS.maskSheet, ms.w, ms.h);
   }
   gl!.uniform3f(uS.tint, tint[0], tint[1], tint[2]);
+  gl!.uniform1f(uS.fowOn, fowOn && fowTex !== null ? 1 : 0);
   gl!.drawArrays(gl!.TRIANGLE_STRIP, 0, 4);
 }
 
@@ -862,14 +1172,34 @@ function unitAnchor(u: EconUnit): { x: number; y: number } {
   return { x: wx, y: wy - terrainHeightPx(wx, wy) };
 }
 
-/** Atlas sprite for the unit's current frame: walk loop while walking, still frame when stay. */
+/**
+ * The loop + frame a unit draws: uaDie while dying (locked stay of Count ticks — KM_UnitTaskDie.pas
+ * :85-86), the uaWork fight loop while fighting (SetActionFight(uaWork) — KM_UnitWarrior.pas:754),
+ * the walk loop while walking, the still frame when staying (M2b).
+ */
+function unitLoop(u: EconUnit, spec: UnitSpec, dir: number): { loop: AnimLoop | undefined; frame: number } {
+  const fs = fightStateOf(u);
+  if (fs === 'die') {
+    const loop = spec.anim[UA_DIE]?.[dir - 1];
+    const count = loop !== undefined && loop.count > 0 ? loop.count : 1;
+    return { loop, frame: Math.max(0, Math.min(u.animStep, count - 1)) };
+  }
+  if (fs === 'fight') {
+    return { loop: spec.anim[UA_WORK]?.[dir - 1], frame: u.animStep };
+  }
+  const loop = walkLoop(spec, dir);
+  return { loop, frame: u.action === 'walk' ? u.animStep : (UNIT_STILL_FRAMES[u.dir] ?? 0) };
+}
+
+/** Atlas sprite for the unit's current frame (fight/die loops included — M4 section 2.7). */
 function unitSprite(u: EconUnit): AtlasSprite | undefined {
   const spec: UnitSpec | undefined = specs[u.type];
   if (spec === undefined) return undefined;
   const dir = u.dir >= 1 && u.dir <= 8 ? u.dir : 1;
-  const loop = walkLoop(spec, dir);
+  const pick = unitLoop(u, spec, dir);
+  const loop = pick.loop !== undefined && pick.loop.count > 0 ? pick.loop : walkLoop(spec, dir);
   if (loop.count <= 0) return undefined;
-  const idx = u.action === 'walk' ? u.animStep % loop.count : (UNIT_STILL_FRAMES[u.dir] ?? 0) % loop.count;
+  const idx = pick.frame % loop.count;
   const stored: number | undefined = loop.steps[idx];
   if (stored === undefined || stored < 0) return undefined;
   return unitByI.get(stored);
@@ -936,6 +1266,29 @@ function slotCount(arr: number[] | undefined, res: number[], slot: number): numb
   return ware >= 0 ? arr[ware] ?? 0 : 0;
 }
 
+/**
+ * Damaged-house fire sub-action sprites (KM_RenderPool.pas:827-875): haFire1..8 are continuous
+ * anims on the global terrain AnimStep, each drawn at CornerX/Y + Anim.MoveX/MoveY; v0 shows the
+ * first `count` fires by damage level (KM_Houses.pas:1347-1363). Fires draw untinted (flag color 0).
+ */
+function drawHouseFires(h: EconHouse, count: number): void {
+  const loops = houseFireAnims[h.typeId];
+  if (loops === undefined || loops.length === 0 || housesAtlas === null) return;
+  const tick = world === null ? 0 : world.tickCount;
+  for (let k = 0; k < count && k < loops.length; k++) {
+    const loop = loops[k]!;
+    if (loop.count <= 0) continue;
+    const step = (tick % loop.count) + 1;
+    const stored = loop.steps[step - 1];
+    if (stored === undefined || stored < 0) continue;
+    const sp = houseByI.get(stored);
+    if (sp === undefined) continue;
+    const cornerX = (h.x - 1) * CELL + sp.px + loop.moveX;
+    const cornerY = (h.y - 1) * CELL + sp.py + loop.moveY + sp.h - cornerHeight(h.x, h.y + 1) * PX_PER_HEIGHT;
+    drawSpriteIn(housesAtlas, houseTex, houseMaskTex, sp, cornerX, cornerY, WHITE, false);
+  }
+}
+
 function drawHouseEntity(h: EconHouse, drawn: { houses: number }): void {
   if (housesAtlas === null) return;
   const hs = houseSpriteOf(h);
@@ -967,9 +1320,13 @@ function drawHouseEntity(h: EconHouse, drawn: { houses: number }): void {
       drawStack(outTable[slot * 5 + Math.min(outCount, MAX_WARES_IN_HOUSE) - 1]!);
     }
   }
+
+  // M4: fire sub-actions by damage level (a destroyed house leaves world.houses; its rubble comes
+  // through the object scan).
+  drawHouseFires(h, houseFireCount(h));
 }
 
-/** White ellipse ring under the selected unit (placeholder, M2b spec 5). */
+/** White ellipse ring under the selected unit (placeholder, M2b spec 5). UI: never FOW-dimmed. */
 function drawRingAt(cx: number, cy: number, rw: number, rh: number): void {
   if (ringTex === null) return;
   gl!.uniform2f(uS.world, cx - rw / 2, cy - rh / 2);
@@ -978,10 +1335,53 @@ function drawRingAt(cx: number, cy: number, rw: number, rh: number): void {
   gl!.uniform2f(uS.sheet, 64, 32);
   gl!.uniform1f(uS.hasMask, 0);
   gl!.uniform3f(uS.tint, 1, 1, 1);
+  gl!.uniform1f(uS.fowOn, 0);
   gl!.activeTexture(gl!.TEXTURE0);
   gl!.bindTexture(gl!.TEXTURE_2D, ringTex);
   gl!.uniform1i(uS.tex, 0);
   gl!.drawArrays(gl!.TRIANGLE_STRIP, 0, 4);
+}
+
+/**
+ * Flight progress 0..1: the sim's `t` is fPosition along the route and `length` is fLength
+ * (combat.ts SimProjectile:154-172); a frozen-minimum implementation exposing only t as a
+ * fraction still works (t <= 1).
+ */
+function projectilePct(p: SimProjectile): number {
+  if (typeof p.length === 'number' && p.length > 0) return Math.max(0, Math.min(1, p.t / p.length));
+  return Math.max(0, Math.min(1, p.t));
+}
+
+/**
+ * Projectiles in flight (KM_Projectiles.pas:362-400 + KM_RenderPool.pas:997-1036): the sim's
+ * tile-space start/end lerped by t, lifted by the Paint parabola (arc * sin(pi*t) + 0.4) and
+ * drawn with the shooter's uaSpec frame; hidden when the point's revelation <= 128 (:1010-1011).
+ */
+function drawProjectile(p: SimProjectile, drawn: { projectiles: number; missing: number }): void {
+  if (world === null || unitsAtlas === null) return;
+  if (p.t < 0) return; // resolved (the sim compacts these away; defensive)
+  const pct = projectilePct(p);
+  const tx = p.fromX + (p.toX - p.fromX) * pct;
+  const ty = p.fromY + (p.toY - p.fromY) * pct;
+  const wx = tx * CELL;
+  const wy = ty * CELL;
+  if (fowOn) {
+    const rev = fowRevAtWorld(wx, wy);
+    if (rev >= 0 && rev <= FOW_HIDE_AT) return; // the game skips projectiles behind FOW
+  }
+  const dir = dirFromDelta(p.toX - p.fromX, p.toY - p.fromY);
+  const sp = projectileSprite(p.kind, dir, pct);
+  if (sp === undefined) {
+    drawn.missing++;
+    return;
+  }
+  const arc = typeof p.arc === 'number' && Number.isFinite(p.arc) && p.arc > 0 ? p.arc : PROJECTILE_ARC[p.kind] ?? 1.6;
+  const cornerX = wx + sp.px - CELL;
+  const cornerY = wy - (arc * Math.sin(pct * Math.PI) + 0.4) * CELL + sp.py + sp.h - CELL - terrainHeightPx(wx, wy);
+  drawSpriteIn(unitsAtlas, unitTex, unitMaskTex, sp, cornerX, cornerY, WHITE, false);
+  const sc = worldToScreen(cornerX, cornerY);
+  projectileScreens.push({ uid: p.uid, kind: p.kind, x: sc.x, y: sc.y, w: sp.w * zoom, h: sp.h * zoom });
+  drawn.projectiles++;
 }
 
 function drawHouseRing(h: EconHouse): void {
@@ -1233,12 +1633,22 @@ function render(): void {
   gl!.clearColor(0x20 / 255, 0x28 / 255, 0x30 / 255, 1);
   gl!.clear(gl!.COLOR_BUFFER_BIT);
   ensureScan();
+  updateFowTexture();
 
   // Terrain: one drawElements (M1 renderer) + the overlay pass (roads + digs; M3 spec 2.9).
+  // M4: the revelation texture multiplies the pass when FOW is on (KM_RenderTerrain.pas:1052-1119).
   gl!.useProgram(terrainProg);
   gl!.uniform2f(uT.cam, camX, camY);
   gl!.uniform1f(uT.zoom, zoom);
   gl!.uniform2f(uT.view, viewW, viewH);
+  gl!.uniform1f(uT.fowOn, fowOn && fowTex !== null ? 1 : 0);
+  gl!.uniform2f(uT.mapCells, map.mapX, map.mapY);
+  gl!.uniform1f(uT.cell, CELL);
+  if (fowTex !== null) {
+    gl!.activeTexture(gl!.TEXTURE1);
+    gl!.bindTexture(gl!.TEXTURE_2D, fowTex);
+    gl!.uniform1i(uT.fow, 1);
+  }
   gl!.activeTexture(gl!.TEXTURE0);
   gl!.bindTexture(gl!.TEXTURE_2D, sheetTex[0]!);
   gl!.uniform1i(uT.tex, 0);
@@ -1251,18 +1661,37 @@ function render(): void {
   gl!.bindVertexArray(null);
 
   // Sprites: rings first, then every entity sorted by its ground line (painter's order).
-  const drawn = { units: 0, houses: 0, objects: 0, missing: 0 };
+  const drawn = { units: 0, houses: 0, objects: 0, projectiles: 0, missing: 0 };
   const houses = activeHouses();
   const units = activeUnits();
-  if ((houses.length > 0 || units.length > 0 || objTiles.length > 0) && quadVao !== null) {
+  const cw = world;
+  const projectiles = cw === null ? [] : cw.projectiles;
+  if ((houses.length > 0 || units.length > 0 || objTiles.length > 0 || projectiles.length > 0) && quadVao !== null) {
     gl!.useProgram(spriteProg);
     gl!.uniform2f(uS.cam, camX, camY);
     gl!.uniform1f(uS.zoom, zoom);
     gl!.uniform2f(uS.view, viewW, viewH);
+    gl!.uniform2f(uS.mapCells, map.mapX, map.mapY);
+    gl!.uniform1f(uS.cell, CELL);
+    if (fowTex !== null) {
+      gl!.activeTexture(gl!.TEXTURE2);
+      gl!.bindTexture(gl!.TEXTURE_2D, fowTex);
+      gl!.uniform1i(uS.fow, 2);
+    }
     gl!.bindVertexArray(quadVao);
 
+    // Rings: every live member of the selected group (M4 group selection), else the single unit.
+    const grp = selectedGroup();
     const selU = selectedUnit();
-    if (selU !== null) {
+    if (grp !== null) {
+      let shown = 0;
+      for (const m of groupMembers(grp)) {
+        if (shown >= 24) break;
+        const a = unitAnchor(m);
+        drawRingAt(a.x, a.y, m.uid === selectedUid ? 48 : 40, m.uid === selectedUid ? 24 : 20);
+        shown++;
+      }
+    } else if (selU !== null) {
       const a = unitAnchor(selU);
       drawRingAt(a.x, a.y, 40, 20);
     }
@@ -1303,6 +1732,7 @@ function render(): void {
     }
 
     for (const h of houses) {
+      if (houseDestroyed(h)) continue; // demolished; the sim deletes it a tick later
       const hs = houseSpriteOf(h);
       if (hs === null) {
         drawn.missing++;
@@ -1313,6 +1743,7 @@ function render(): void {
 
     for (const u of units) {
       if (u.inside) continue; // invisible inside a house (spec 2.6)
+      if (isDeadUnit(u)) continue; // corpse closed by the sim (deleted when pointer-free)
       const sp = unitSprite(u);
       if (sp === undefined) {
         drawn.missing++;
@@ -1322,11 +1753,22 @@ function render(): void {
       list.push({ y: a.y + sp.py + sp.h, run: () => drawUnitEntity(u, sp, a, drawn) });
     }
 
+    // Projectiles in flight (M4): sorted into the same painter list by their ground line.
+    projectileScreens = [];
+    for (const p of projectiles) {
+      const pct = projectilePct(p);
+      const tx = p.fromX + (p.toX - p.fromX) * pct;
+      const ty = p.fromY + (p.toY - p.fromY) * pct;
+      const ground = (ty + 0.5 - Math.abs(Math.min(pct, 1) - 0.5) - 0.5) * CELL;
+      list.push({ y: ground, run: () => drawProjectile(p, drawn) });
+    }
+
     list.sort((p, q) => p.y - q.y);
     for (const e of list) e.run();
     gl!.bindVertexArray(null);
   }
-  frameStats = { frames: frameStats.frames + 1, unitsDrawn: drawn.units, housesDrawn: drawn.houses, objectsDrawn: drawn.objects, missingSprites: drawn.missing };
+  projectileDrawCount = drawn.projectiles;
+  frameStats = { frames: frameStats.frames + 1, unitsDrawn: drawn.units, housesDrawn: drawn.houses, objectsDrawn: drawn.objects, projectilesDrawn: drawn.projectiles, missingSprites: drawn.missing };
   updateHud();
 }
 
@@ -1344,8 +1786,39 @@ function updateHud(): void {
   }
   const sel = selectedUnit();
   let line = `tick=${world === null ? 0 : world.tickCount} units=${activeUnits().length} selected=${sel === null ? '-' : sel.uid}`;
-  if (sel !== null) line += ` type=${sel.type} action=${sel.action} task=${sel.taskKind} pos=(${sel.posF.x.toFixed(2)},${sel.posF.y.toFixed(2)})`;
+  if (sel !== null) {
+    line += ` type=${sel.type} action=${sel.action} task=${sel.taskKind} pos=(${sel.posF.x.toFixed(2)},${sel.posF.y.toFixed(2)})`;
+    const hp = unitHitPoints(sel);
+    const fs = fightStateOf(sel);
+    if (hp !== null) line += ` hp=${hp}`;
+    if (fs !== 'none') line += ` fight=${fs}`;
+  }
   lines.push(line);
+
+  // M4: the selected group (count, order, condition) and the human hand's damaged houses' HP.
+  if (world !== null) {
+    const grp = selectedGroup();
+    if (grp !== null) {
+      const members = groupMembers(grp);
+      const target = grp.order === 'attackUnit' ? ` unit=${grp.targetUid}` : grp.order === 'attackHouse' ? ` house=${grp.targetHouseUid}` : '';
+      const at = grp.order === 'walk' || grp.order === 'attackUnit' || grp.order === 'attackHouse' ? ` @(${grp.orderX},${grp.orderY})` : '';
+      lines.push(`group=${grp.uid} owner=${grp.owner} members=${members.length}/${grp.memberUids.length} order=${grp.order}${at}${target} condition=${groupCondition(grp)}`);
+    } else if (selectedUid !== 0) {
+      lines.push('group=- (unit is not in a warrior group)');
+    }
+    const hand = humanHand();
+    const dmg: string[] = [];
+    for (const h of activeHouses()) {
+      if (h.owner !== hand) continue;
+      const hp = houseHealthOf(h);
+      const spec = houseSpecs[h.typeId];
+      if (hp === null || spec === undefined || hp >= spec.maxHealth) continue;
+      dmg.push(`${h.uid}:${hp}/${spec.maxHealth}`);
+    }
+    if (dmg.length > 0) lines.push(`houses dmg (hand ${hand}): ${dmg.join(' ')}`);
+    const revTxt = hoverX >= 1 && hoverY >= 1 ? ` rev=(${fowTileRev(hoverX, hoverY)})` : '';
+    lines.push(`fow=${fowOn ? 'on' : 'off'} hand=${fowHand} (F toggles)${revTxt}`);
+  }
 
   if (world !== null) {
     const c = counts();
@@ -1377,6 +1850,9 @@ function updateHud(): void {
       if (n > 0) stock.push(`${WARE_NAMES[ware] ?? ware}\u00d7${n}`);
     }
     lines.push(`house=${sh.uid} ${name} owner=${sh.owner} state=${sh.state} worker=${sh.workerUid} in=[${inPart.join(' ')}] out=[${outPart.join(' ')}]`);
+    const hp = houseHealthOf(sh);
+    const fires = houseFireCount(sh);
+    if (hp !== null && spec !== undefined) lines.push(`house hp=${hp}/${spec.maxHealth} fires=${fires}`);
     lines.push(`house stock: ${stock.join(' ') || '-'}`);
   }
 
@@ -1444,12 +1920,12 @@ function stepWorld(): void {
   applyOrders();
 }
 
-// ---- input (M2b spec 5 + M3 camera keys) ------------------------------------
+// ---- input (M2b spec 5 + M3 camera keys + M4 group orders) -------------------
 function selectAt(sx: number, sy: number): void {
   let best: EconUnit | null = null;
   let bestDist = SELECT_RADIUS_PX;
   for (const u of activeUnits()) {
-    if (u.inside) continue;
+    if (u.inside || isDeadUnit(u)) continue;
     const p = unitSpriteCenterScreen(u);
     if (p === null) continue;
     const d = Math.hypot(p.x - sx, p.y - sy);
@@ -1461,6 +1937,7 @@ function selectAt(sx: number, sy: number): void {
   if (best !== null) {
     selectedUid = best.uid;
     selectedHouseUid = 0;
+    selectedGroupUid = groupUidOf(best.uid); // M4: click selects the unit and its group
     return;
   }
   // No unit under the cursor: a house sprite rect (topmost drawn one wins).
@@ -1479,7 +1956,47 @@ function selectAt(sx: number, sy: number): void {
     }
   }
   selectedUid = 0;
+  selectedGroupUid = 0;
   selectedHouseUid = pick === null ? 0 : pick.uid;
+}
+
+/** Nearest unit of a different owner under the cursor (an attack target for the selected group). */
+function enemyUnitAt(sx: number, sy: number): EconUnit | null {
+  const hand = humanHand();
+  let best: EconUnit | null = null;
+  let bestDist = SELECT_RADIUS_PX;
+  for (const u of activeUnits()) {
+    if (u.inside || isDeadUnit(u) || u.owner === hand) continue;
+    const p = unitSpriteCenterScreen(u);
+    if (p === null) continue;
+    const d = Math.hypot(p.x - sx, p.y - sy);
+    if (d <= bestDist) {
+      bestDist = d;
+      best = u;
+    }
+  }
+  return best;
+}
+
+/** Topmost house of a different owner under the cursor (an attack target for the selected group). */
+function enemyHouseAt(sx: number, sy: number): EconHouse | null {
+  const hand = humanHand();
+  let pick: EconHouse | null = null;
+  let pickY = -Infinity;
+  for (const h of activeHouses()) {
+    if (h.owner === hand) continue;
+    const hs = houseSpriteOf(h);
+    if (hs === null) continue;
+    const tl = worldToScreen(hs.cornerX, hs.cornerY);
+    if (sx >= tl.x && sx <= tl.x + hs.sp.w * zoom && sy >= tl.y && sy <= tl.y + hs.sp.h * zoom) {
+      const bottom = hs.cornerY + hs.sp.h;
+      if (bottom > pickY) {
+        pick = h;
+        pickY = bottom;
+      }
+    }
+  }
+  return pick;
 }
 
 /** Right-click order (M2b): walk to the tile under the cursor; flash red when findPath is null.
@@ -1503,12 +2020,53 @@ function orderWalkAt(vx: number, vy: number): void {
   pendingOrders.push({ uid: u.uid, x: tile.x, y: tile.y });
 }
 
+/**
+ * M4 right-click: a selected warrior group of the human hand orders walk / attack through the
+ * frozen world.orderGroup (attack = enemy unit or house under the cursor, KM_UnitGroup.pas orders).
+ * A selected unit without a group keeps the M3 viewer-side walk (economy demo unchanged).
+ */
+function orderAt(vx: number, vy: number): void {
+  const r = cv.getBoundingClientRect();
+  const sx = vx - r.left;
+  const sy = vy - r.top;
+  const grp = selectedGroup();
+  if (world !== null && grp !== null && grp.owner === humanHand()) {
+    const tile = tileAtPoint(sx, sy);
+    if (tile === null) return;
+    const enemy = enemyUnitAt(sx, sy);
+    if (enemy !== null) {
+      try {
+        if (!world.orderGroup(grp.uid, 'attackUnit', enemy.posF.x, enemy.posF.y, enemy.uid)) flashHud();
+      } catch {
+        flashHud();
+      }
+      return;
+    }
+    const house = enemyHouseAt(sx, sy);
+    if (house !== null) {
+      try {
+        if (!world.orderGroup(grp.uid, 'attackHouse', house.x, house.y, house.uid)) flashHud();
+      } catch {
+        flashHud();
+      }
+      return;
+    }
+    try {
+      if (!world.orderGroup(grp.uid, 'walk', tile.x, tile.y)) flashHud();
+    } catch {
+      flashHud();
+    }
+    return;
+  }
+  orderWalkAt(vx, vy);
+}
+
 function bindInput(): void {
   let downX = 0;
   let downY = 0;
   cv.addEventListener('pointerdown', (e) => {
     if (e.button === 2) {
-      orderWalkAt(e.clientX, e.clientY);
+      orderAt(e.clientX, e.clientY);
       return;
     }
     if (e.button !== 0) return;
@@ -1580,6 +2138,11 @@ function bindInput(): void {
     if (e.key === 'Escape') {
       e.preventDefault();
       closePicker();
+      return;
+    }
+    if (e.key === 'f' || e.key === 'F') {
+      fowOn = !fowOn;
+      fowDirtyTick = -1;
       return;
     }
     if (e.key === 'r' || e.key === 'R') {
@@ -1706,6 +2269,12 @@ function resetMapState(): void {
   speedCache = new Map();
   selectedUid = 0;
   selectedHouseUid = 0;
+  selectedGroupUid = 0;
+  currentKaMap = null;
+  fowHand = HUMAN_HAND_FALLBACK;
+  fowDirtyTick = -1;
+  fowTexW = 0;
+  fowTexH = 0;
   hoverX = -1;
   hoverY = -1;
   acc = 0;
@@ -1741,6 +2310,10 @@ function buildStaticHouses(m: Mission): EconHouse[] {
       workerUid: 0,
       animStep: 0,
       workAnimStep: 0,
+      maxHealth: spec !== undefined ? spec.maxHealth : 0,
+      damage: 0,
+      destroyed: false,
+      fireLevel: 0,
     });
   }
   return out;
@@ -1765,6 +2338,10 @@ function buildStaticUnits(m: Mission): EconUnit[] {
       inside: false,
       homeUid: 0,
       taskKind: 'none',
+      hitPoints: 0,
+      groupUid: 0,
+      fightState: 'none',
+      dead: false,
     });
   }
   return out;
@@ -1783,6 +2360,7 @@ async function loadTutorial(): Promise<void> {
   map = { file: mapData.file, mapX: mapData.mapX, mapY: mapData.mapY };
   tiles = tileBytes;
   mission = parseMissionScript(missionBuf, mapData.mapX, mapData.mapY);
+  fowHand = humanHand();
 
   // Road overlay tiles: mission.streets are map coords (spec 2.1: SET_STREET places (x+1, y+1)).
   const stride = mapData.mapX + 1;
@@ -1803,6 +2381,7 @@ async function loadTutorial(): Promise<void> {
     tail: { resHead: null, mapEdChunk: false, tailBytes: 0 },
   } as KaMap;
   world = createEconomyWorld({ map: kaMap, tiles: tileFlags, elems, unitSpecs: specs, serfCarry, houseSpecs, mission });
+  currentKaMap = kaMap;
   applyDemoScenario(world);
 
   // M2b compat shim: SimUnit.speed on the live units for the CDP hooks (the frozen EconUnit has no
@@ -1826,6 +2405,7 @@ async function loadScannedMap(kind: string, name: string): Promise<void> {
   if (token !== loadToken) return;
   const lm = parseMapBytes(mapBuf, `${kind}/${name}`);
   loadedMap = lm;
+  currentKaMap = lm;
   map = { file: `${name}.map`, mapX: lm.mapX, mapY: lm.mapY };
   tiles = lm.tiles;
   baseTerrain = lm.baseTerrain;
@@ -1834,6 +2414,7 @@ async function loadScannedMap(kind: string, name: string): Promise<void> {
   mapSource = { kind, name };
   mapInfo = mapList.find((m) => m.kind === kind && m.name === name) ?? null;
   mission = parseMissionScript(datBuf, lm.mapX, lm.mapY);
+  fowHand = humanHand();
 
   // Stored overlays (Remake maps): toRoad joins the mission streets in the road set, toDig1..4
   // become the plain dig sprites (spec section 5; standard maps carry all-zero overlays).
@@ -1882,6 +2463,176 @@ async function switchToTutorial(): Promise<void> {
   }
 }
 
+// ---- M4 combat helpers (viewer-side world setup for the CDP proof + the lead) ----------------
+/** Build the economy/combat world for the current scanned map on demand. The M3b page loads other
+ *  maps static (no sim); the frozen world API needs a world to fight in, so this switches the page
+ *  to economy mode for the current map. The tutorial is already economy. */
+function enableCombatWorld(): { ok: boolean; mode: string; reason?: string } {
+  if (world !== null) return { ok: true, mode: 'economy' };
+  if (currentKaMap === null || mission === null) return { ok: false, mode: 'static', reason: 'no map loaded' };
+  try {
+    world = createEconomyWorld({ map: currentKaMap, tiles: tileFlags, elems, unitSpecs: specs, serfCarry, houseSpecs, mission });
+  } catch (err) {
+    world = null;
+    return { ok: false, mode: 'static', reason: err instanceof Error ? err.message : String(err) };
+  }
+  scannedTick = -1;
+  prevObj = new Map();
+  falling = new Map();
+  moves = new Map();
+  pendingOrders = [];
+  selectedUid = 0;
+  selectedGroupUid = 0;
+  selectedHouseUid = 0;
+  ensureScan();
+  updateHud();
+  return { ok: true, mode: 'economy' };
+}
+
+/** House footprint tiles of the current mission (the same plan the world carves out of the walk
+ *  grid; keeps the scripted fight from spawning inside a house). */
+function missionHouseTiles(): Set<number> {
+  const out = new Set<number>();
+  if (mission === null || currentKaMap === null) return out;
+  const stride = currentKaMap.mapX + 1;
+  for (const mh of mission.houses) {
+    const plan = housePlan(mh.typeId);
+    for (let i = 1; i <= 4; i++) {
+      for (let k = 1; k <= 4; k++) {
+        if (plan[i - 1]![k - 1] === 0) continue;
+        const tx = mh.x + k - 3;
+        const ty = mh.y + i - 4;
+        if (tx >= 1 && ty >= 1 && tx <= currentKaMap.mapX && ty <= currentKaMap.mapY) out.add(ty * stride + tx);
+      }
+    }
+  }
+  return out;
+}
+
+/** Walkable tiles around an anchor, nearest ring first, skipping house tiles and used spots. */
+function openTilesNear(g: PassGrid, cx: number, cy: number, count: number, houseTiles: Set<number>, used: Set<number>): { x: number; y: number }[] {
+  const out: { x: number; y: number }[] = [];
+  const stride = g.mapX + 1;
+  for (let r = 0; r <= 16 && out.length < count; r++) {
+    for (let dy = -r; dy <= r && out.length < count; dy++) {
+      for (let dx = -r; dx <= r && out.length < count; dx++) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+        const x = cx + dx;
+        const y = cy + dy;
+        if (x < 1 || y < 1 || x > g.mapX - 1 || y > g.mapY - 1) continue;
+        const idx = y * stride + x;
+        if (used.has(idx) || houseTiles.has(idx)) continue;
+        if (!tileWalkable(g, x, y)) continue;
+        used.add(idx);
+        out.push({ x, y });
+      }
+    }
+  }
+  return out;
+}
+
+interface FightPlan { owner: number; typeId: number; anchorX: number; anchorY: number; count: number; dir: number }
+interface FightGroupReport { owner: number; groupUid: number; typeId: number; members: number[] }
+interface FightReport { ok: boolean; reason?: string; mode?: string; spawned?: number; groups?: FightGroupReport[] }
+
+/**
+ * Scripted skirmish for the viewer proof: first tries the sim's own script group constructor
+ * (spawnGroup — the game's TKMUnitGroup.Create from `!SET_GROUP`, combat.ts:2413-2436, needs the
+ * world's spawnUnit/newGroup); falls back to rebuilding the world with a synthetic mission, which
+ * the frozen createEconomyWorld turns into units + warrior groups. Default plan: 3 bowmen + 2
+ * sword fighters per side, 8 tiles between the archers (inside the 4..10.99 range).
+ */
+function scriptedFight(plan?: FightPlan[]): FightReport {
+  if (world === null) {
+    const en = enableCombatWorld();
+    if (!en.ok) return { ok: false, reason: en.reason ?? 'no world' };
+  }
+  if (mission === null || currentKaMap === null) return { ok: false, reason: 'no mission or map loaded' };
+  if (world === null) return { ok: false, reason: 'no world (enableCombatWorld failed?)' };
+  const mx = currentKaMap.mapX;
+  const my = currentKaMap.mapY;
+  const cx = Math.max(2, Math.floor(mx / 2));
+  const cy = Math.max(2, Math.floor(my / 2));
+  const specsPlan: FightPlan[] = plan ?? [
+    { owner: 0, typeId: UT_BOWMAN, anchorX: cx - 4, anchorY: cy, count: 3, dir: 3 },
+    { owner: 0, typeId: UT_SWORDFIGHTER, anchorX: cx - 2, anchorY: cy, count: 2, dir: 3 },
+    { owner: 1, typeId: UT_BOWMAN, anchorX: cx + 4, anchorY: cy, count: 3, dir: 7 },
+    { owner: 1, typeId: UT_SWORDFIGHTER, anchorX: cx + 2, anchorY: cy, count: 2, dir: 7 },
+  ];
+  const g = buildPassGrid(currentKaMap, tileFlags, elems);
+  const houseTiles = missionHouseTiles();
+  const used = new Set<number>();
+  const spots: { owner: number; typeId: number; x: number; y: number; dir: number }[] = [];
+  for (const p of specsPlan) {
+    for (const s of openTilesNear(g, p.anchorX, p.anchorY, p.count, houseTiles, used)) {
+      spots.push({ owner: p.owner, typeId: p.typeId, x: s.x, y: s.y, dir: p.dir });
+    }
+  }
+  if (spots.length === 0) return { ok: false, reason: 'no open tiles near the map centre' };
+
+  // 1) the sim's own script constructor (spawnGroup + the world's spawnUnit/newGroup).
+  const wv = world as unknown as { spawnUnit?: unknown; newGroup?: unknown };
+  if (typeof wv.spawnUnit === 'function' && typeof wv.newGroup === 'function') {
+    try {
+      const groups: FightGroupReport[] = [];
+      let spawned = 0;
+      for (const p of specsPlan) {
+        const anchor = openTilesNear(g, p.anchorX, p.anchorY, 1, houseTiles, used)[0];
+        if (anchor === undefined) continue;
+        const grp = spawnGroup(world as unknown as Parameters<typeof spawnGroup>[0], p.owner, p.typeId, anchor.x, anchor.y, p.dir, p.count, p.count);
+        spawned += grp.memberUids.length;
+        groups.push({ owner: p.owner, groupUid: grp.uid, typeId: p.typeId, members: grp.memberUids.slice() });
+      }
+      if (groups.length > 0) {
+        selectedUid = 0;
+        selectedGroupUid = 0;
+        ensureScan();
+        updateHud();
+        return { ok: true, mode: 'spawn', spawned, groups };
+      }
+    } catch {
+      // fall through to the synthetic-mission rebuild
+    }
+  }
+
+  // 2) frozen-interface fallback: rebuild the world with a synthetic mission.
+  const units: MissionUnit[] = mission.units.map((u) => ({ typeId: u.typeId, x: u.x, y: u.y, owner: u.owner }));
+  for (const s of spots) units.push({ typeId: s.typeId, x: s.x, y: s.y, owner: s.owner });
+  const synth: Mission = { ...mission, units };
+  let w2: EconomyWorld;
+  try {
+    w2 = createEconomyWorld({ map: currentKaMap, tiles: tileFlags, elems, unitSpecs: specs, serfCarry, houseSpecs, mission: synth });
+  } catch (err) {
+    return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+  }
+  world = w2;
+  scannedTick = -1;
+  prevObj = new Map();
+  falling = new Map();
+  moves = new Map();
+  pendingOrders = [];
+  selectedUid = 0;
+  selectedGroupUid = 0;
+  selectedHouseUid = 0;
+  ensureScan();
+  updateHud();
+
+  // The spawned warriors are the last `spots.length` units (buildUnits keeps mission order).
+  const spawned = world.units.slice(Math.max(0, world.units.length - spots.length));
+  const byGroup = new Map<number, FightGroupReport>();
+  for (const u of spawned) {
+    const guid = groupUidOf(u.uid);
+    if (guid === 0) continue;
+    let entry = byGroup.get(guid);
+    if (entry === undefined) {
+      entry = { owner: u.owner, groupUid: guid, typeId: u.type, members: [] };
+      byGroup.set(guid, entry);
+    }
+    entry.members.push(u.uid);
+  }
+  return { ok: true, mode: 'rebuild', spawned: spots.length, groups: [...byGroup.values()] };
+}
+
 // ---- test hook (the CDP proof script drives the page through it) ------------
 function installHook(): void {
   const hook = {
@@ -1901,6 +2652,7 @@ function installHook(): void {
       const steps = Math.max(0, Math.min(1_000_000, Math.floor(n)));
       for (let i = 0; i < steps; i++) world.tick();
       ensureScan();
+      fowDirtyTick = -1;
       return counts();
     },
     selectedUid: () => selectedUid,
@@ -2010,6 +2762,159 @@ function installHook(): void {
     },
     loadMap: (kind: string, name: string) => switchTo(kind, name),
     loadTutorial: () => switchToTutorial(),
+
+    // ---- M4 hooks (docs/M4-SPIKE.md section 5: FOW, groups, projectiles, houses, orders) ----
+    /** Tile revelation of the current FOW hand, 1-based tile (0..255; -1 = no FOW data). */
+    fowAt: (x: number, y: number) => fowTileRev(x, y),
+    fowVertAt: (x: number, y: number) => fowVertRev(x, y),
+    fowOn: () => fowOn,
+    /** Toggle (or set) the FOW rendering; returns the new state. */
+    fowToggle: (on?: boolean) => {
+      fowOn = typeof on === 'boolean' ? on : !fowOn;
+      fowDirtyTick = -1;
+      return fowOn;
+    },
+    fowHand: () => fowHand,
+    setFowHand: (h: number) => {
+      fowHand = Number.isFinite(h) ? Math.max(0, Math.floor(h)) : HUMAN_HAND_FALLBACK;
+      fowDirtyTick = -1;
+      return fowHand;
+    },
+    humanHand: () => humanHand(),
+    /** Projectiles in flight (frozen SimProjectile list, copied). */
+    projectiles: () => (world === null ? [] : world.projectiles.map((p) => ({ ...p }))),
+    /** Projectiles actually drawn in the last frame (FOW-hidden ones are skipped). */
+    projectileDraws: () => projectileDrawCount,
+    /** Viewport rects of the projectiles drawn in the last frame (css px, canvas-relative). */
+    projectileScreens: () => projectileScreens.map((p) => ({ ...p })),
+    /** Warrior groups (frozen SimGroup list, copied). */
+    groups: () => (world === null ? [] : world.groups.map((g) => ({ ...g, memberUids: g.memberUids.slice() }))),
+    groupOf: (uid: number) => {
+      if (world === null) return null;
+      const g = world.groupOf(uid);
+      return g === null || g === undefined ? null : { ...g, memberUids: g.memberUids.slice() };
+    },
+    selectedGroupUid: () => selectedGroupUid,
+    selectedGroup: () => {
+      const g = selectedGroup();
+      return g === null ? null : { ...g, memberUids: g.memberUids.slice() };
+    },
+    /** The viewer-side group condition (fighting/walking/attacking/halted/idle/dead). */
+    groupCondition: (uid: number) => {
+      const g = world === null ? null : world.groups.find((x) => x.uid === uid) ?? null;
+      return g === null ? null : groupCondition(g);
+    },
+    unitHealth: (uid: number) => {
+      if (world === null) return null;
+      const v = world.unitHealth(uid);
+      return typeof v === 'number' && Number.isFinite(v) ? v : null;
+    },
+    houseHealth: (uid: number) => {
+      const h = activeHouses().find((x) => x.uid === uid);
+      return h === undefined ? null : houseHealthOf(h);
+    },
+    /** MaxHealth accessor: the sim's house field, else the parsed spec. */
+    houseMaxHealth: (uid: number) => {
+      const h = activeHouses().find((x) => x.uid === uid);
+      if (h === undefined) return null;
+      if (Number.isFinite(h.maxHealth)) return h.maxHealth;
+      const spec = houseSpecs[h.typeId];
+      return spec === undefined ? null : spec.maxHealth;
+    },
+    /** One house's combat summary (health, max, fires, destroyed) for the proof. */
+    houseCombat: (uid: number) => {
+      const h = activeHouses().find((x) => x.uid === uid);
+      if (h === undefined) return null;
+      return {
+        uid: h.uid,
+        owner: h.owner,
+        typeId: h.typeId,
+        health: houseHealthOf(h),
+        maxHealth: Number.isFinite(h.maxHealth) ? h.maxHealth : houseSpecs[h.typeId]?.maxHealth ?? null,
+        fires: houseFireCount(h),
+        destroyed: houseDestroyed(h),
+      };
+    },
+    /** Fire sub-action sprites the viewer is drawing for a house (0..8). */
+    houseFires: (uid: number) => {
+      const h = activeHouses().find((x) => x.uid === uid);
+      return h === undefined ? null : houseFireCount(h);
+    },
+    damageHouse: (uid: number, amount: number, attackerUid = 0) => {
+      if (world === null) return false;
+      try {
+        world.damageHouse(uid, amount, attackerUid);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    /** Rubble tiles the viewer is drawing (obj 68..73 — KM_Terrain.pas:4936). */
+    rubble: () => {
+      const out: { x: number; y: number; obj: number }[] = [];
+      if (map === null) return out;
+      const stride = map.mapX + 1;
+      for (const idx of objTiles) {
+        const obj = objAt(idx);
+        if (!RUBBLE_OBJS.has(obj)) continue;
+        const x = idx % stride;
+        out.push({ x, y: (idx - x) / stride, obj });
+      }
+      return out;
+    },
+    /** Refresh the viewer's object scan now (no sim tick) — proof helper for rubble after Demolish. */
+    rescan: () => {
+      if (world === null) return 0;
+      scannedTick = -1;
+      scanObjects();
+      return objTiles.length;
+    },
+    /** Order any group through the frozen orderGroup (the UI itself orders the human hand only). */
+    orderGroup: (uid: number, kind: 'walk' | 'attackUnit' | 'attackHouse' | 'halt' | 'none', x: number, y: number, target?: number) => {
+      if (world === null) return false;
+      try {
+        return world.orderGroup(uid, kind, x, y, target);
+      } catch {
+        return false;
+      }
+    },
+    orderAttack: (groupUid: number, targetUid: number) => {
+      if (world === null) return false;
+      try {
+        return world.orderGroup(groupUid, 'attackUnit', 0, 0, targetUid);
+      } catch {
+        return false;
+      }
+    },
+    orderAttackHouse: (groupUid: number, houseUid: number) => {
+      if (world === null) return false;
+      try {
+        return world.orderGroup(groupUid, 'attackHouse', 0, 0, houseUid);
+      } catch {
+        return false;
+      }
+    },
+    orderWalk: (groupUid: number, x: number, y: number) => {
+      if (world === null) return false;
+      try {
+        return world.orderGroup(groupUid, 'walk', x, y);
+      } catch {
+        return false;
+      }
+    },
+    orderHalt: (groupUid: number) => {
+      if (world === null) return false;
+      try {
+        return world.orderGroup(groupUid, 'halt', 0, 0);
+      } catch {
+        return false;
+      }
+    },
+    combatMode: () => (world === null ? 'none' : 'combat'),
+    /** Build the economy/combat world for the current scanned map (M3b loads other maps static). */
+    enableCombatWorld: () => enableCombatWorld(),
+    /** Scripted skirmish (spawnGroup, else a synthetic-mission rebuild); returns the spawned groups. */
+    scriptedFight: (plan?: FightPlan[]) => scriptedFight(plan),
   };
   (window as unknown as Record<string, unknown>).__kamplay = hook;
 }
@@ -2041,6 +2946,7 @@ async function boot(): Promise<void> {
   const supply = parseSupplyTables(housesBuf);
   supplyIn = supply.in;
   supplyOut = supply.out;
+  houseFireAnims = parseHouseFireAnims(housesBuf);
   tileFlags = parseTilesJson(tilesText);
   mapList = mapsJson
     .slice()
