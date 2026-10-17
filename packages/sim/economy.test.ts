@@ -266,3 +266,40 @@ test('applyDemoScenario plants 12 full trees within Chebyshev 9 of the hut and o
   run(w, 4000);
   assert.ok(w.wareCount(w.houses[2], 2) >= 2);
 });
+
+// M4 fix (worker J's crash repro): destroying a house while economy tasks reference it must not
+// crash the next tick. Houses are resolved by uid, a destroyed house is deleted only when the pass
+// runs (KM_HouseCollection.pas 426–436), and an in-flight delivery abandons gracefully
+// (KM_UnitTaskDelivery.pas 361; the ware returns to the from-house when it still exists).
+test('demolishing a house mid-delivery abandons the delivery and never crashes', () => {
+  const w = makeWorld();
+  applyDemoScenario(w);
+  const store = w.houses[2]; // the hand-1 store: the demo timber demand target
+  let inFlight = false;
+  for (let i = 0; i < 3000 && !inFlight; i++) {
+    w.tick();
+    inFlight = w.units.some((u) => u.taskKind === 'deliver');
+  }
+  assert.ok(inFlight, 'a delivery must be in flight');
+  assert.ok(w.events.some((e) => e.text.startsWith('delivery-assigned')));
+
+  w.damageHouse(store.uid, 1_000_000, 0);
+  assert.equal(store.destroyed, true);
+  const demolishTick = w.tickCount;
+
+  // No exception on the following ticks (the repro crashed on the next tick); the in-flight
+  // delivery is abandoned.
+  let abandoned = false;
+  for (let i = 0; i < 300 && !abandoned; i++) {
+    w.tick();
+    abandoned = w.events.some((e) => e.text.startsWith('delivery-abandoned'));
+  }
+  assert.ok(abandoned, 'the delivery must be abandoned gracefully');
+  for (let i = 0; i < 200; i++) w.tick(); // the crash happened one tick after the demolish
+
+  assert.equal(w.houses.length, 2); // the store was deleted one tick after Demolish
+  assert.ok(w.tickCount - demolishTick >= 200, 'the world must keep ticking past the demolish');
+  assert.ok(!w.units.some((u) => u.homeUid === store.uid));
+  assert.ok(w.units.every((u) => !u.inside || u.homeUid !== 0), 'no unit may stay inside a gone house');
+  assert.equal(w.units.filter((u) => u.taskKind === 'deliver').length, 0, 'no delivery may outlive its houses');
+});

@@ -34,6 +34,18 @@ export interface UnitSpec {
   // literals (`{ speedRaw, anim }`, which must keep type-checking) stay valid; parseUnitDat always
   // sets it.
   miningRange?: number;
+  // M4 (docs/M4-SPIKE.md §3, additive): the combat stats of TKMUnitSpecLegacy (res/KM_ResUnits.pas
+  // 16–29) after PatchUnitSpec (566–607), plus the fight-type table (362–378) and the warrior range
+  // check (WARRIOR_MIN..WARRIOR_MAX, KM_Defaults.pas). Optional in the type so every pre-M4 spec
+  // literal still typechecks; parseUnitDat always sets all of them.
+  hitPoints?: number; // HitPoints at +0
+  attack?: number; // Attack at +2
+  attackHorse?: number; // AttackHorse at +4
+  defence?: number; // Defence at +8
+  sight?: number; // Sight at +14
+  fightType?: 'melee' | 'ranged'; // GetFightType (362–378): ftRanged = bowman/crossbowman/rogue
+  isWarrior?: boolean; // IsWarrior (246–249): records 14..27 (utMilitia..utVagabond)
+  record?: number; // the unit.dat record index (the parser sets it; combat tables read it)
 }
 
 const SERF_CARRY_SIZE = 15680; // 28 * 8 * 70 (LoadUnitsDat 699)
@@ -45,6 +57,26 @@ const DIR_COUNT = 8; // dirN..dirNW (KM_Points.pas 8)
 const LOOP_SIZE = 70;
 const DEF_MOUNTED_SPEED = 39; // PatchUnitSpec 572
 const MOUNTED_RECORDS = [21, 22, 27]; // utScout / utKnight / utVagabond (591–598)
+
+// PatchUnitSpec (566–607): the shipped defaults the Remake overwrites (see the header).
+const DEF_SCOUT_SIGHT = 9;
+const DEF_VAGABOND_ATTACK = 40;
+const DEF_REBEL_ATTACK_HORSE = 60;
+const DEF_LANCE_CARRIER_ATTACK_HORSE = 55;
+
+// GetFightType (362–378): ftRanged for utBowman 17, utCrossbowman 18, utRogue 25; ftMelee for the
+// other warrior records 14..27. IsWarrior (246–249): WARRIOR_MIN..WARRIOR_MAX = utMilitia..utVagabond.
+const WARRIOR_MIN_RECORD = 14;
+const WARRIOR_MAX_RECORD = 27;
+const RANGED_RECORDS = new Set([17, 18, 25]);
+
+// TKMUnitSpecLegacy offsets (16–29): HitPoints 0, Attack 2, AttackHorse 4, x4 6, Defence 8,
+// Speed 10, x7 12, Sight 14, x9 16, x10 18, CanWalkOut 20, x11 22.
+const LEGACY_HP = 0;
+const LEGACY_ATTACK = 2;
+const LEGACY_ATTACK_HORSE = 4;
+const LEGACY_DEFENCE = 8;
+const LEGACY_SIGHT = 14;
 
 // GetMiningRange (KM_ResUnits.pas 423–433) by unit.dat record: utWoodcutter 1, utFarmer 4,
 // utFisher 8, utStonemason 10 (UNIT_ID_TO_TYPE order, KM_ResUnits.pas 146–157).
@@ -78,6 +110,15 @@ export function parseUnitDat(buf: Uint8Array): UnitSpec[] {
     let speedRaw = readI16(buf, base + 10); // Speed at +10 (TKMUnitSpecLegacy 16–29)
     if (MOUNTED_RECORDS.includes(i) && speedRaw === DEF_MOUNTED_SPEED) speedRaw = 40;
 
+    // PatchUnitSpec stat overrides (578–598): only when the shipped default is present.
+    let sight = readI16(buf, base + LEGACY_SIGHT);
+    if (i === 21 && sight === DEF_SCOUT_SIGHT) sight = 13; // utScout
+    let attack = readI16(buf, base + LEGACY_ATTACK);
+    if (i === 27 && attack === DEF_VAGABOND_ATTACK) attack = 35; // utVagabond
+    let attackHorse = readI16(buf, base + LEGACY_ATTACK_HORSE);
+    if (i === 24 && attackHorse === DEF_REBEL_ATTACK_HORSE) attackHorse = 50; // utRebel
+    if (i === 19 && attackHorse === DEF_LANCE_CARRIER_ATTACK_HORSE) attackHorse = 60; // utLanceCarrier
+
     const anim: AnimLoop[][] = [];
     for (let action = 0; action < ACTION_COUNT; action++) {
       const dirs: AnimLoop[] = [];
@@ -90,7 +131,19 @@ export function parseUnitDat(buf: Uint8Array): UnitSpec[] {
       anim.push(dirs);
     }
 
-    out.push({ speedRaw, anim, miningRange: MINING_RANGES.get(i) ?? 0 });
+    out.push({
+      speedRaw,
+      anim,
+      miningRange: MINING_RANGES.get(i) ?? 0,
+      hitPoints: readI16(buf, base + LEGACY_HP),
+      attack,
+      attackHorse,
+      defence: readI16(buf, base + LEGACY_DEFENCE),
+      sight,
+      fightType: RANGED_RECORDS.has(i) ? 'ranged' : 'melee',
+      isWarrior: i >= WARRIOR_MIN_RECORD && i <= WARRIOR_MAX_RECORD,
+      record: i,
+    });
   }
   return out;
 }

@@ -15,7 +15,7 @@
     "rnginfo": "node tools/rnginfo/cli.ts",
     "synth": "node tools/synth/cli.ts",
     "walksim": "node tools/walksim/cli.ts",
-    "test": "node --test packages/sim/rng.test.ts packages/sim/terrain.test.ts packages/sim/astar.test.ts packages/sim/walk.test.ts packages/sim/sim.test.ts packages/sim/economy.test.ts packages/mission/mission.test.ts packages/assets/housedata.test.ts packages/map/map.test.ts packages/map/maplist.test.ts packages/replay/rpl.test.ts",
+    "test": "node --test packages/sim/rng.test.ts packages/sim/terrain.test.ts packages/sim/astar.test.ts packages/sim/walk.test.ts packages/sim/sim.test.ts packages/sim/economy.test.ts packages/sim/combat.test.ts packages/mission/mission.test.ts packages/assets/housedata.test.ts packages/map/map.test.ts packages/map/maplist.test.ts packages/replay/rpl.test.ts",
     "serve": "node apps/web/serve.ts"
   },
   "devDependencies": {

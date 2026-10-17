@@ -42,6 +42,10 @@ export interface HouseSpec {
   maxHealth: number; // (WoodCost+StoneCost)*50
   woodCost: number;
   stoneCost: number;
+  // M4 (additive, docs/M4-SPIKE.md 2.6): the house sight radius (Sight at +1649, GetSight
+  // res/KM_ResHouses.pas 91). Optional so pre-M4 HouseSpec literals still typecheck; the parser
+  // always sets it.
+  sight?: number;
 }
 
 const BEAST_BLOCK = 2100; // SizeOf(fBeastAnim) = 30 × 70 (913)
@@ -142,6 +146,7 @@ export function parseHousesDat(bytes: Uint8Array): (HouseSpec | undefined)[] {
       maxHealth: (woodCost + stoneCost) * 50, // MaxHealth accessor 630–633
       woodCost,
       stoneCost,
+      sight: readI16(bytes, o + 1649), // Sight field (record layout, header comment)
     };
   }
   return out;
