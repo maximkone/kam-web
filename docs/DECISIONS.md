@@ -2,6 +2,21 @@
 
 Newest first. Only decisions the lead/owner actually made, with evidence.
 
+## 2026-10-17 - M5d-A accepted: the command layer + the skirmish sim (worker O)
+
+- Lead re-ran: `SKIRMISH CHECK PASS (3000 ticks, 384 events, 8 commands)` twice identical (sha `54a2cdfc...`),
+  command-log replay on a fresh world gives the same sha (failures=0), invalid commands and commands to an AI hand
+  are rejected without changing the sha; `--bench` 1 human + 3 AI on a 256x256 map: median 1.3 ms, p95 5.3 ms per
+  tick (budget 100 ms); `npm test` 144/144; `tsc` 0; `aisim` shas unchanged (1a425dcd / d1825fa9 / c2fe7b1c);
+  WALK/ECON/COMBAT/BUILD/MAPSCAN unchanged. Record: `docs/M5D-SPIKE.md` section 6.
+- Victory rule ported from the Remake (`KM_AI.pas:158-268`, `KM_AIGoals.pas:189-205`,
+  `KM_MissionScript_Standard.pas:728-757`): default = survive while you have buildings, win when every enemy has none.
+- Refused for now (v0 economy lacks them): `houseDeliveryMode`, `houseWareDemand`, `houseRepair`, wine fields.
+  Group split/link out. Classic AI not ported. The skirmish `--check` sha depends on the AI/economy and will be
+  re-frozen when worker Q's production lands.
+- For M5d-B (UI) the sim still lacks: a browser-safe `.map` reader taking a `Uint8Array`, a per-hand "buildable
+  house types" query, a barracks equip queue (equip is immediate), per-hand stat counters.
+
 ## 2026-10-17 - N2 result: the AI cannot raise an army because the ECONOMY SIM is incomplete
 
 - Lead re-ran: `AI CHECK PASS (economy 30000; attack 12000; organic 60000 ticks)` twice identical (organic sha
