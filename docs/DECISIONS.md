@@ -2,6 +2,16 @@
 
 Newest first. Only decisions the lead/owner actually made, with evidence.
 
+## 2026-10-17 — M5 wave 2a: the Advanced AI's economy half runs (worker M)
+
+- `node tools/aisim/cli.ts --check` → `AI CHECK PASS` deterministic (sha `f62714ce…`): on
+  `MapsMP/Battle Sun` the AI **plans and builds its own economy village** — sawmill, coal mine, farm,
+  woodcutters, store, school and 5 quarries planned; 5 built; 86 road tiles laid; 7 sites dug;
+  39 units trained (serfs/builders/metallurgists/miners); the production chain runs. 119/119 tests;
+  all earlier frozen shas unchanged; record in `docs/M5-SPIKE.md` §7.4 (simplifications listed there).
+- Next: wave 2b — the military half (ArmyManagement/ArmyAttackNew/ArmyDefence/Supervisor + the
+  scripted attack/defence records), then a browser match vs the AI on a real map.
+
 ## 2026-10-17 — M4 accepted: combat slice (workers I + J)
 
 - Worker I (combat sim): `COMBAT CHECK PASS` deterministic (sha `09a19821…`, two runs identical),

@@ -79,7 +79,7 @@ import type { AnimLoop, UnitSpec } from '../assets/unitdat.ts';
 import type { HouseSpec } from '../assets/housedata.ts';
 import { housePlan } from '../assets/housedata.ts';
 import type { Mission } from '../mission/mission.ts';
-import { WARE_CNT, WT_TRUNK, WT_TIMBER, WT_STONE } from '../assets/wares.ts';
+import { WARE_CNT, WT_TRUNK, WT_TIMBER, WT_STONE, WT_GOLD } from '../assets/wares.ts';
 // M5a construction slice (docs/M5-SPIKE.md §1a/§2; construction.ts holds the plan stores).
 import type {
   BuildSite,
@@ -215,6 +215,10 @@ export interface EconHouse {
   readyToBeBuilt: boolean; // fIsReadyToBeBuilt
   woodCost: number; // gRes.Houses[type].WoodCost
   stoneCost: number; // gRes.Houses[type].StoneCost
+  // M5b (additive): the woodcutter's flag point (KM_HouseWoodcutters.FlagPoint; null/undefined =
+  // the default PointBelowEntrance, KM_Houses.pas 2554). The AI sets it for chop-only woodcutters.
+  // Optional so pre-M5b EconHouse literals (the viewer) still typecheck.
+  flagPoint?: Pt | null;
 }
 
 export interface EconUnit {
@@ -228,7 +232,7 @@ export interface EconUnit {
   carry: number; // ware id, -1 = none
   inside: boolean;
   homeUid: number; // 0 = none
-  taskKind: 'none' | 'goHome' | 'chop' | 'saw' | 'deliver' | 'idle' | 'buildHouseArea' | 'buildHouse' | 'buildRoad' | 'buildField';
+  taskKind: 'none' | 'goHome' | 'chop' | 'saw' | 'deliver' | 'idle' | 'buildHouseArea' | 'buildHouse' | 'buildRoad' | 'buildField' | 'selfTrain';
   // M4 (additive): unit combat (docs/M4-SPIKE.md §3)
   hitPoints: number;
   groupUid: number; // 0 = none
@@ -313,7 +317,10 @@ type Task =
       field: FieldPlan | null;
       tileLockSet: boolean;
       closed: boolean;
-    };
+    }
+  // M5b (additive): TKMTaskSelfTrain (units/tasks/KM_UnitTaskSelfTrain.pas 70-118) — the school
+  // training task of the unit being trained (5×29 stays + 9 idle ≈ 154 ticks, then walk out).
+  | { kind: 'selfTrain'; phase: number; schoolUid: number };
 
 interface Demand {
   houseUid: number; // the demand's house; the house may be destroyed/deleted later (KM_Houses Demolish)
@@ -340,6 +347,13 @@ interface HouseState {
   workerUid: number;
   being: number[]; // per input slot: reserved deliveries (demand cap)
   isStore: boolean;
+  // M5b (additive): the school queue (KM_HouseSchool.pas 11-46): fQueue[0..5] of unit.dat records
+  // (-1 = utNone; slot 0 trains), fUnitWip (the unit being trained, uid 0 = none), fHideOneGold
+  // and fTrainProgress. Only htSchool houses get these.
+  schoolQueue?: number[];
+  unitWipUid?: number;
+  hideOneGold?: boolean;
+  trainProgress?: number;
 }
 
 interface UnitState {
@@ -359,6 +373,31 @@ interface UnitState {
 
 function pointBelowEntrance(h: EconHouse): Pt {
   return { x: h.entrance.x, y: h.entrance.y + 1 };
+}
+
+/** The script id of htSchool (HOUSE_ID_TO_TYPE[13] = 19) — the school queue exception. */
+const HOUSE_TYPE_SCHOOL = 13;
+
+/**
+ * The per-house runtime state. M5b: a school (script id 13) gets the queue of
+ * TKMHouseSchool (fQueue 6 slots, -1 = utNone) + fUnitWip/fHideOneGold/fTrainProgress.
+ */
+function createHouseState(typeId: number, spec: HouseSpec | undefined): HouseState {
+  const isStore = typeId === 11; // htStore script id
+  const state: HouseState = {
+    spec,
+    stock: isStore ? new Int32Array(WARE_CNT) : null,
+    workerUid: 0,
+    being: [0, 0, 0, 0],
+    isStore,
+  };
+  if (typeId === HOUSE_TYPE_SCHOOL) {
+    state.schoolQueue = [-1, -1, -1, -1, -1, -1];
+    state.unitWipUid = 0;
+    state.hideOneGold = false;
+    state.trainProgress = 0;
+  }
+  return state;
 }
 
 function samePoint(a: Pt, b: Pt): boolean {
@@ -701,17 +740,11 @@ export class EconomyWorld {
         readyToBeBuilt: false,
         woodCost: spec !== undefined ? spec.woodCost : 0,
         stoneCost: spec !== undefined ? spec.stoneCost : 0,
+        flagPoint: null,
       };
       this.houses.push(house);
 
-      const isStore = mh.typeId === 11; // htStore script id
-      const state: HouseState = {
-        spec,
-        stock: isStore ? new Int32Array(WARE_CNT) : null,
-        workerUid: 0,
-        being: [0, 0, 0, 0],
-        isStore,
-      };
+      const state: HouseState = createHouseState(mh.typeId, spec);
       this.houseStateMap.set(house.uid, state);
 
       // Footprint: BuildArea nonzero cells, row I = Y − pos.Y + 4, col K = X − pos.X + 3
@@ -1272,9 +1305,25 @@ export class EconomyWorld {
         return this.runBuildRoad(u, st, task);
       case 'buildField':
         return this.runBuildField(u, st, task);
+      case 'selfTrain':
+        return this.runSelfTrain(u, st, task);
       default:
         return 'done';
     }
+  }
+
+  /** The woodcutter's flag point (KM_HouseWoodcutters.FlagPoint): the AI sets it once. */
+  setHouseFlagPoint(houseUid: number, x: number, y: number): void {
+    const h = this.houseByUid(houseUid);
+    if (h !== null) h.flagPoint = { x, y };
+  }
+
+  /** TKMHouse.Demolish from the AI (exhausted mines, chop-only woodcutters, unused houses). */
+  demolishHouseByUid(houseUid: number, fromOwner: number): boolean {
+    const h = this.houseByUid(houseUid);
+    if (h === null || h.destroyed) return false;
+    this.demolishHouse(h, fromOwner);
+    return true;
   }
 
   /** The unit's home, or null when the house is gone or destroyed (the task then abandons). */
@@ -1905,6 +1954,8 @@ export class EconomyWorld {
     }
     const slot = this.inSlot(h, ware);
     if (slot >= 0) h.wareIn[slot] += 1;
+    // TKMHouseSchool.WareAddToIn (:104–110): a delivery may start the next training.
+    if (st.schoolQueue !== undefined && st.unitWipUid === 0) this.schoolStartTraining(h.uid);
   }
 
   // -------------------------------------------------------------------------------------------
@@ -2113,7 +2164,8 @@ export class EconomyWorld {
   // Chop plan (KM_UnitWorkPlan.pas 187–237, 240–283; KM_Terrain.pas 2823–2869)
 
   private chooseChopPlan(home: EconHouse, st: UnitState): ChopPlan | null {
-    const center = pointBelowEntrance(home); // flag point default (KM_Houses.pas 2554)
+    // Flag point default (KM_Houses.pas 2554); the AI's chop-only woodcutters set it explicitly.
+    const center = home.flagPoint ?? pointBelowEntrance(home);
     const radius = st.spec.miningRange ?? 0;
     const treeList = this.findTrees(center, radius);
     if (treeList.length === 0) return null;
@@ -2435,6 +2487,17 @@ export class EconomyWorld {
     return C.houseCanBuild(this.constructionState(hand).locks, typeId);
   }
 
+  /**
+   * Locks.HouseCreated (KM_HandLocks.pas:80–83): unlock every house released by a type. The
+   * world's own `activate` calls it for built houses; the AI also needs it for the houses it
+   * places directly (PlaceFirstStorehouse) and for mission houses (KM_Houses.pas 562–566 runs
+   * Activate(False) for hbsDone houses — the v0 mission-house path skips that, so the AI scenario
+   * applies it explicitly; see packages/sim/ai.ts applyMissionHouseUnlocks).
+   */
+  houseCreatedFor(hand: number, typeId: number): void {
+    C.houseCreated(this.constructionState(hand).locks, typeId);
+  }
+
   /** The ready-to-build site slot of a house, or null (TKMHouseList lookup by house). */
   siteOf(houseUid: number): BuildSite | null {
     const h = this.houseByUid(houseUid);
@@ -2499,16 +2562,10 @@ export class EconomyWorld {
       readyToBeBuilt: false,
       woodCost: spec !== undefined ? spec.woodCost : 0,
       stoneCost: spec !== undefined ? spec.stoneCost : 0,
+      flagPoint: null,
     };
     this.houses.push(house);
-    const isStore = typeId === 11;
-    this.houseStateMap.set(house.uid, {
-      spec,
-      stock: isStore ? new Int32Array(WARE_CNT) : null,
-      workerUid: 0,
-      being: [0, 0, 0, 0],
-      isStore,
-    });
+    this.houseStateMap.set(house.uid, createHouseState(typeId, spec));
     this.setHouseTerrain(house, 'fence'); // KM_Houses.pas 569 (hbsNoGlyph → hsFence)
     this.emit('house-wip', `house#${house.uid} type=${typeId} (${locX},${locY})`);
     return house;
@@ -3523,6 +3580,436 @@ export class EconomyWorld {
     else C.closeField(task.field);
   }
 
+  // =============================================================================================
+  // M5b school training (docs/M5-AI-NOTES.md gap item 2; KM_HouseSchool.pas + KM_UnitTaskSelfTrain.pas)
+
+  /** The school state of a house, or null when it is not a school. */
+  private schoolState(h: EconHouse): HouseState | null {
+    const st = this.houseState(h);
+    return st.schoolQueue !== undefined ? st : null;
+  }
+
+  /** TKMHouseSchool.AddUnitToQueue (:116–133): fill the first free queue slots 1..5, start training. */
+  schoolAddUnitToQueue(houseUid: number, unitType: number, count: number): number {
+    const h = this.houseByUid(houseUid);
+    if (h === null || h.destroyed) return 0;
+    const st = this.schoolState(h);
+    if (st === null || st.schoolQueue === undefined) return 0;
+    let added = 0;
+    for (let k = 1; k <= Math.min(count, st.schoolQueue.length); k++) {
+      for (let i = 1; i < st.schoolQueue.length; i++) {
+        if (st.schoolQueue[i] === -1) {
+          added += 1;
+          st.schoolQueue[i] = unitType;
+          if (i === 1) this.schoolStartTraining(h.uid); // "If thats the first unit then start training it"
+          break;
+        }
+      }
+    }
+    return added;
+  }
+
+  /** The queue slots of a school (copy; slot 0 = the unit in training, -1 = empty). */
+  schoolQueueOf(houseUid: number): number[] {
+    const h = this.houseByUid(houseUid);
+    if (h === null) return [];
+    const st = this.schoolState(h);
+    return st !== null && st.schoolQueue !== undefined ? st.schoolQueue.slice() : [];
+  }
+
+  /** TKMHouseSchool.QueueCount (:318–326). */
+  schoolQueueCount(houseUid: number): number {
+    const h = this.houseByUid(houseUid);
+    if (h === null) return 0;
+    const st = this.schoolState(h);
+    if (st === null || st.schoolQueue === undefined) return 0;
+    let n = 0;
+    for (const q of st.schoolQueue) if (q !== -1) n += 1;
+    return n;
+  }
+
+  /** The uid of the unit being trained (0 = none) — fUnitWip. */
+  schoolUnitWip(houseUid: number): number {
+    const h = this.houseByUid(houseUid);
+    if (h === null) return 0;
+    const st = this.schoolState(h);
+    return st !== null ? st.unitWipUid ?? 0 : 0;
+  }
+
+  /** TKMHouseSchool.StartTrainingUnit (:249–262): shift the queue, create the unit, start the task. */
+  schoolStartTraining(houseUid: number): void {
+    const h = this.houseByUid(houseUid);
+    if (h === null || h.destroyed) return;
+    const st = this.schoolState(h);
+    if (st === null || st.schoolQueue === undefined) return;
+    if (st.schoolQueue[0] !== -1) return; // a unit is already in training
+    if (st.schoolQueue[1] === -1) return; // nothing queued
+    if (this.wareCount(h, WT_GOLD) === 0) return; // there must be gold to train
+    for (let i = 0; i < st.schoolQueue.length - 1; i++) st.schoolQueue[i] = st.schoolQueue[i + 1];
+    st.schoolQueue[st.schoolQueue.length - 1] = -1;
+    this.schoolCreateUnit(h, st);
+  }
+
+  /** TKMHouseSchool.CreateUnit (:233–246): hide one gold, create the unit inside, start the task. */
+  private schoolCreateUnit(h: EconHouse, st: HouseState): void {
+    const type = st.schoolQueue !== undefined ? st.schoolQueue[0] : -1;
+    if (type < 0) return;
+    st.hideOneGold = true;
+    // gHands[Owner].TrainUnit: the unit is created at (Entrance, dirS), inside the house (no tile).
+    const unit = this.spawnCitizen(h.owner, type, h.entrance.x, h.entrance.y, 6, h.uid);
+    st.unitWipUid = unit.uid;
+    const ust = this.unitStateMap.get(unit);
+    if (ust !== undefined) {
+      ust.task = { kind: 'selfTrain', phase: 0, schoolUid: h.uid };
+      ust.walk = null;
+      ust.actionLock = 0;
+      ust.locked = false;
+      unit.taskKind = 'selfTrain';
+    }
+    h.workAnimStep = 0; // WorkAnimStep := 0 (:245)
+    this.emit('school-unit-created', `house#${h.uid} unit#${unit.uid} type=${type}`);
+  }
+
+  /** TKMHouseSchool.UnitTrainingComplete (:266–283): clear the wip, take the gold, start the next. */
+  private schoolUnitTrainingComplete(h: EconHouse, st: HouseState): void {
+    st.unitWipUid = 0;
+    if (st.schoolQueue !== undefined) st.schoolQueue[0] = -1;
+    // "Script command might have taken the gold while we were training, in which case ignore it"
+    if (this.wareCount(h, WT_GOLD) > 0) this.takeFromIn(h, WT_GOLD);
+    st.hideOneGold = false;
+    st.trainProgress = 0;
+    this.schoolStartTraining(h.uid);
+  }
+
+  /** WareTakeFromIn(wtGold) (KM_Houses.pas 1725–1740): take one unit of a ware from the input. */
+  private takeFromIn(h: EconHouse, ware: number): boolean {
+    if (h.destroyed) return false;
+    const slot = this.inSlot(h, ware);
+    if (slot < 0 || h.wareIn[slot] <= 0) return false;
+    h.wareIn[slot] -= 1;
+    return true;
+  }
+
+  /** TKMTaskSelfTrain.Execute (:70–118): 5×29 + 9 stays, then go outside + UnitTrainingComplete. */
+  private runSelfTrain(u: EconUnit, st: UnitState, task: Task & { kind: 'selfTrain' }): 'continues' | 'done' {
+    const school = this.houseByUid(task.schoolUid);
+    if (school === null || school.destroyed) return 'done'; // the school erases the task on destruction
+    const sch = this.schoolState(school);
+    if (sch === null) return 'done';
+    switch (task.phase) {
+      case 0:
+        school.state = 'work'; // SetState(hstWork) + SubActionWork(haWork1)
+        this.setLockedStay(u, st, 29, false);
+        task.phase = 1;
+        return 'continues';
+      case 1:
+      case 2:
+      case 3:
+      case 4:
+        this.setLockedStay(u, st, 29, false);
+        task.phase += 1;
+        return 'continues';
+      case 5:
+        school.state = 'idle'; // SetState(hstIdle)
+        this.setLockedStay(u, st, 9, false);
+        task.phase = 6;
+        return 'continues';
+      case 6: {
+        // Put him in the school + go outside; the school completes the training (:107–114).
+        // (TKMUnit.TrainInHouse only starts the task — the unit has no home yet; UnitTrained
+        // registers builders in fConstructions / serfs in fDeliveries, KM_Hand.pas 553–563.)
+        this.goOut(u, st, school);
+        this.schoolUnitTrainingComplete(school, sch);
+        this.emit('school-unit-trained', `unit#${u.uid} type=${u.type}`);
+        if (u.type === UNIT_BUILDER) C.addWorker(this.constructionState(u.owner), u.uid); // UnitTrained 553–565
+        task.phase = 7;
+        return 'continues';
+      }
+      default:
+        return 'done';
+    }
+  }
+
+  // =============================================================================================
+  // M5b AI world API (docs/M5-AI-NOTES.md §3 checklist): the terrain/stat queries the ported
+  // newAI reads (packages/sim/ai.ts). All additive; the viewer/tests are unaffected.
+
+  /** TileIsStone (KM_Terrain.pas 1385–1388): the Stone deposit of the tile's terrain (0 = none). */
+  tileIsStone(x: number, y: number): number {
+    return this.tileDeposit(x, y, 'stone');
+  }
+
+  /** TileIsCoal (1391–1394). */
+  tileIsCoal(x: number, y: number): number {
+    return this.tileDeposit(x, y, 'coal');
+  }
+
+  /** TileIsIron (1397–1400). */
+  tileIsIron(x: number, y: number): number {
+    return this.tileDeposit(x, y, 'iron');
+  }
+
+  /** TileIsGold (1403–1406). */
+  tileIsGold(x: number, y: number): number {
+    return this.tileDeposit(x, y, 'gold');
+  }
+
+  tileHasStone(x: number, y: number): boolean {
+    return this.tileIsStone(x, y) > 0;
+  }
+
+  tileHasCoal(x: number, y: number): boolean {
+    return this.tileIsCoal(x, y) > 0;
+  }
+
+  tileHasIron(x: number, y: number): boolean {
+    return this.tileIsIron(x, y) > 0;
+  }
+
+  tileHasGold(x: number, y: number): boolean {
+    return this.tileIsGold(x, y) > 0;
+  }
+
+  /** CanPlaceIronMine (KM_Terrain.pas 4711–4716): TileIsGoodForIronMine. */
+  tileGoodForIronMine(x: number, y: number): boolean {
+    return this.tileFlag(x, y, 'ironMinable');
+  }
+
+  /** CanPlaceGoldMine: TileIsGoodForGoldMine. */
+  tileGoodForGoldMine(x: number, y: number): boolean {
+    return this.tileFlag(x, y, 'goldMinable');
+  }
+
+  /** tpWalkRoad (KM_Terrain.pas 3780–3782): a walkable, roaded tile. */
+  tileWalkableRoad(x: number, y: number): boolean {
+    return tileWalkable(this.roadGrid, x, y);
+  }
+
+  /** The tile lock (TKMTileLock; TL_* in this module) — the AI's plan/lock queries. */
+  tileLockAt(x: number, y: number): number {
+    if (!this.inMapCoords(x, y)) return TL_NONE;
+    return this.tileLock[this.index(x, y)];
+  }
+
+  /** TileIsRoadable (KM_Terrain.pas 1620–1635): the tiles.json Roadable flag. */
+  tileIsRoadable(x: number, y: number): boolean {
+    return this.tileFlag(x, y, 'roadable');
+  }
+
+  private tileDeposit(x: number, y: number, field: 'stone' | 'coal' | 'iron' | 'gold'): number {
+    if (!this.inMapCoords(x, y)) return 0;
+    const flags = this.grid.tiles[this.terrainId(x, y)];
+    if (flags === undefined) return 0;
+    const v = flags[field];
+    return typeof v === 'number' ? v : 0;
+  }
+
+  /** TileIsSoil (KM_Terrain.pas 1523–1526): the tiles.json Soil flag. */
+  tileIsSoil(x: number, y: number): boolean {
+    return this.tileFlag(x, y, 'soil');
+  }
+
+  /** CanPlaceHouse (KM_Terrain.pas 4758–4781): the terrain-only house-plan check (entrance). */
+  canPlaceHouse(typeId: number, entranceX: number, entranceY: number): boolean {
+    return C.canPlaceHouse(this, typeId, entranceX, entranceY);
+  }
+
+  private tileFlag(x: number, y: number, field: 'roadable' | 'soil' | 'ironMinable' | 'goldMinable'): boolean {
+    if (!this.inMapCoords(x, y)) return false;
+    const flags = this.grid.tiles[this.terrainId(x, y)];
+    if (flags === undefined) return false;
+    return flags[field] === true;
+  }
+
+  /** CanFindTree (KM_Terrain.pas 2781–2814): any tree of the asked age with a valid cutting spot. */
+  canFindTree(x: number, y: number, radius: number, onlyAgeFull = false): boolean {
+    const tiles = this.tilesWithinDistance({ x, y }, radius);
+    for (const t of tiles) {
+      const dx = Math.abs(x - t.x);
+      const dy = Math.abs(y - t.y);
+      const diag = dx > dy ? dx + dy * 0.41 : dy + dx * 0.41;
+      if (diag > radius) continue;
+      const obj = this.treeAt(t.x, t.y);
+      if (obj === null) continue;
+      if (onlyAgeFull && (!isTreeAgeFull(obj.obj) || obj.age < TREE_AGE_FULL)) continue;
+      if (!this.canCutTreeAtVertex({ x, y }, t)) continue;
+      if (this.chooseCuttingDirection({ x, y }, t) === null) continue;
+      return true;
+    }
+    return false;
+  }
+
+  /** GetWareBalance (KM_HandStats.pas): the wares of a hand held in its houses (stores included). */
+  handWareBalance(hand: number, ware: number): number {
+    let n = 0;
+    for (const h of this.houses) {
+      if (h.owner !== hand || h.destroyed) continue;
+      n += this.wareCount(h, ware);
+    }
+    return n;
+  }
+
+  /** GetHouseQty (KM_HandStats): complete (hbsDone) houses of a script-id type. */
+  handHouseCount(hand: number, typeId: number): number {
+    let n = 0;
+    for (const h of this.houses) {
+      if (h.owner !== hand || h.destroyed) continue;
+      if (h.typeId !== typeId) continue;
+      if (h.buildState === 'done') n += 1;
+    }
+    return n;
+  }
+
+  /** GetHouseTotal: every (not destroyed) house of a script-id type, WIP included. */
+  handHouseTotalCount(hand: number, typeId: number): number {
+    let n = 0;
+    for (const h of this.houses) {
+      if (h.owner !== hand || h.destroyed) continue;
+      if (h.typeId === typeId) n += 1;
+    }
+    return n;
+  }
+
+  /** GetHouseQty(htAny): all houses of the hand. */
+  handHouseAnyCount(hand: number): number {
+    let n = 0;
+    for (const h of this.houses) {
+      if (h.owner === hand && !h.destroyed) n += 1;
+    }
+    return n;
+  }
+
+  /** GetUnitQty (KM_HandStats): live units of a unit.dat record. */
+  handUnitCount(hand: number, type: number): number {
+    let n = 0;
+    for (const u of this.units) {
+      if (u.owner === hand && u.type === type && !u.dead) n += 1;
+    }
+    return n;
+  }
+
+  /**
+   * TKMHand.AddFirstStorehouse's AddRoad (KM_Hand.pas 2185–2196): a real road on the tile
+   * (SetRoad + FlattenTerrain + remove wine/corn objects). Only used by the AI's first store.
+   */
+  addRoadTile(x: number, y: number): void {
+    if (!this.inMapCoords(x, y)) return;
+    this.setRoad(x, y, 0);
+    this.flattenTerrain(x, y);
+    if (this.grid.elems[this.grid.obj[this.index(x, y)]].wineOrCorn) this.removeObject(x, y);
+  }
+
+  /**
+   * WareAddToEitherFromScript (KM_Houses.pas): a script/AI ware injection — a store's stock or
+   * the house's input slot, with an offer for output wares/stores. `addWareToStore` delegates here.
+   */
+  addWareToHouseFromScript(houseUid: number, ware: number, amount: number): boolean {
+    if (ware < 0 || ware >= WARE_CNT || amount <= 0) return false;
+    const h = this.houseByUid(houseUid);
+    if (h === null || h.destroyed) return false;
+    const st = this.houseState(h);
+    if (st.stock !== null) {
+      st.stock[ware] = Math.min(65535, st.stock[ware] + amount);
+      this.addOffer(h.uid, ware, amount);
+      return true;
+    }
+    const inSlot = this.inSlot(h, ware);
+    if (inSlot >= 0) {
+      h.wareIn[inSlot] = Math.min(65535, h.wareIn[inSlot] + amount);
+      if (st.schoolQueue !== undefined && st.unitWipUid === 0) this.schoolStartTraining(h.uid);
+      return true;
+    }
+    const outSlot = this.outSlot(h, ware);
+    if (outSlot >= 0) {
+      h.wareOut[outSlot] = Math.min(65535, h.wareOut[outSlot] + amount);
+      this.addOffer(h.uid, ware, amount);
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * WareAddToEitherFromScript into the hand's first complete store (KM_Hand.pas 2210) — the
+   * bootstrap path the AI's first storehouse uses (fChooseLocation.Resources).
+   */
+  addWareToStore(hand: number, ware: number, amount: number): boolean {
+    if (ware < 0 || ware >= WARE_CNT || amount <= 0) return false;
+    const store = this.houses.find((h) => h.typeId === 11 && h.owner === hand && !h.destroyed && h.buildState === 'done');
+    if (store === undefined) return false;
+    return this.addWareToHouseFromScript(store.uid, ware, amount);
+  }
+
+  /**
+   * TKMHand.TrainUnit (KM_Hand.pas 538–550): a citizen created at (entrance, dirS), inside the
+   * house (it does not occupy a terrain tile). The school's CreateUnit + the AI's spawns use it.
+   */
+  spawnCitizen(owner: number, type: number, x: number, y: number, dir: number, inHouseUid = 0): EconUnit {
+    const spec = this.unitSpecs[type];
+    if (spec === undefined) throw new Error(`spawnCitizen: no unit.dat record ${type}`);
+    const unit: EconUnit = {
+      uid: this.uidCounter++,
+      owner,
+      type,
+      posF: { x, y },
+      dir,
+      animStep: 0,
+      action: 'stay',
+      carry: -1,
+      inside: inHouseUid !== 0,
+      homeUid: 0,
+      taskKind: 'none',
+      hitPoints: spec.hitPoints ?? 0,
+      groupUid: 0,
+      fightState: 'none',
+      dead: false,
+    };
+    this.units.push(unit);
+    const st: UnitState = {
+      spec,
+      speed: walkSpeeds(spec.speedRaw),
+      walk: null,
+      actionLock: 0,
+      locked: false,
+      task: null,
+      homeUid: 0,
+      warrior: null,
+      posRound: { x, y },
+      posPrev: { x, y },
+      posNext: { x, y },
+    };
+    this.unitStates.push(st);
+    this.unitStateMap.set(unit, st);
+    if (inHouseUid === 0 && x >= 0 && x <= this.map.mapX && y >= 0 && y <= this.map.mapY) {
+      this.unitTile[this.index(x, y)] = unit.uid; // a free unit occupies its tile
+    }
+    const fog = this.fow[owner];
+    if (fog !== undefined) fog.reveal(x, y, spec.sight ?? 0, true);
+    return unit;
+  }
+
+  /** The unit's current task phase (−1 = no task) — the AI's builder dig-state check. */
+  unitTaskPhase(unitUid: number): number {
+    const u = this.unitByUid(unitUid);
+    if (u === null) return -1;
+    const st = this.unitStateMap.get(u);
+    if (st === undefined || st.task === null) return -1;
+    return (st.task as { phase: number }).phase;
+  }
+
+  /** The unit's buildHouse target house uid (0 = not building a house) — the builder's site check. */
+  unitBuildHouseUid(unitUid: number): number {
+    const u = this.unitByUid(unitUid);
+    if (u === null) return 0;
+    const st = this.unitStateMap.get(u);
+    if (st === undefined || st.task === null || st.task.kind !== 'buildHouse') return 0;
+    return st.task.houseUid;
+  }
+
+  /** TKMHandConstructions.AddWorker — a trained builder joins the registry (KM_Hand.pas 553–555). */
+  registerBuilder(hand: number, unitUid: number): void {
+    C.addWorker(this.constructionState(hand), unitUid);
+  }
+
 
   // =============================================================================================
   // M4 combat host (docs/M4-SPIKE.md §3): the world side of packages/sim/combat.ts
@@ -3921,6 +4408,20 @@ export class EconomyWorld {
     h.destroyed = true;
     void fromOwner;
 
+    // TKMHouseSchool.Demolish (:89–100): drop the queued units and cancel the WIP one.
+    const st = this.houseState(h);
+    if (st.schoolQueue !== undefined) {
+      for (let i = 1; i < st.schoolQueue.length; i++) st.schoolQueue[i] = -1;
+      const wip = st.unitWipUid ?? 0;
+      st.unitWipUid = 0;
+      st.schoolQueue[0] = -1;
+      st.hideOneGold = false;
+      if (wip !== 0) {
+        const wu = this.unitByUid(wip);
+        if (wu !== null && !wu.dead) this.closeUnit(wu); // CancelTrainingUnit: CloseUnit(False)
+      }
+    }
+
     // SetHouse(fPosition, fType, hsNone, HAND_NONE): release the footprint, recompute tpWalk.
     const plan = housePlan(h.typeId);
     for (let i = 1; i <= 4; i++) {
@@ -4251,16 +4752,10 @@ export class EconomyWorld {
       readyToBeBuilt: false,
       woodCost: spec !== undefined ? spec.woodCost : 0,
       stoneCost: spec !== undefined ? spec.stoneCost : 0,
+      flagPoint: null,
     };
     this.houses.push(house);
-    const isStore = typeId === 11;
-    const state: HouseState = {
-      spec,
-      stock: isStore ? new Int32Array(WARE_CNT) : null,
-      workerUid: 0,
-      being: [0, 0, 0, 0],
-      isStore,
-    };
+    const state: HouseState = createHouseState(typeId, spec);
     this.houseStateMap.set(house.uid, state);
 
     const plan = housePlan(typeId);

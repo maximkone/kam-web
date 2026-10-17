@@ -40,10 +40,11 @@ Chrono Divide does for Red Alert 2.
   and playable in `/play.html` (arrows in flight, fights, burning/collapsing houses, FOW toggle).
   Lead-verified: CDP 16/16, `npm test` 98/98; workers I (sim) + J (viewer); record in
   `docs/M4-SPIKE.md` §7.
-- **M5 — advanced AI: NEXT** (research in `docs/M5-AI-NOTES.md`). Wave 1: construction slice (house
-  plans, builders, materials — what the AI's CityBuilder drives); wave 2: the newAI port (Eye,
-  CityPlanner/Builder/Management, Army management, Supervisor) so you can play against it on your
-  own maps.
+- **M5 — advanced AI: IN PROGRESS** (research in `docs/M5-AI-NOTES.md`, spec `docs/M5-SPIKE.md`).
+  Wave 1 (construction) DONE 2026-10-17: plans, builders, materials, stages, activation — you can
+  build; `BUILD CHECK PASS` + CDP 44/44. Wave 2a (the AI's economy half) DONE: the AI plans and
+  builds its own village on a real map (`AI CHECK PASS`). Wave 2b (military half: armies, attacks,
+  defence, supervisor) in progress — then you can play against it.
 
 ## Quickstart (Windows, Node >= 24)
 

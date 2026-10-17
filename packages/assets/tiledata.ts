@@ -35,6 +35,17 @@ export interface TileFlags {
   // TileIsSoil → TileGoodForField (KM_Terrain.pas 1275–1284, 1523–1526). Optional so pre-M5
   // TileFlags literals still typecheck; the parser always sets it.
   soil?: boolean;
+  // M5b (additive, the AI port): the resource deposits of the tile, read by TileIsStone/Coal/
+  // Iron/Gold (KM_Terrain.pas 1385–1430) and the mine placement checks
+  // (TileIsGoodForIronMine/GoldMine, KM_ResTileset.pas 506–518). `stone`/`coal`/`iron`/`gold`
+  // are the deposit amounts (0 = none); optional so pre-M5b TileFlags literals still typecheck —
+  // the parser always sets them.
+  stone?: number;
+  coal?: number;
+  iron?: number;
+  gold?: number;
+  ironMinable?: boolean; // "IronMinable" (CanPlaceIronMine, KM_Terrain.pas 4711–4716)
+  goldMinable?: boolean; // "GoldMinable" (CanPlaceGoldMine)
 }
 
 interface RawTile {
@@ -42,6 +53,12 @@ interface RawTile {
   Walkable?: boolean;
   Roadable?: boolean;
   Soil?: boolean;
+  Stone?: number;
+  Coal?: number;
+  Iron?: number;
+  Gold?: number;
+  IronMinable?: boolean;
+  GoldMinable?: boolean;
   CornersTerKinds?: string[];
 }
 
@@ -72,6 +89,14 @@ export function parseTilesJson(text: string): TileFlags[] {
       roadable: tile.Roadable === true,
       corners,
       soil: tile.Soil === true, // TileIsSoil (KM_Terrain.pas 1523–1526)
+      // M5b resource deposits (LoadFromJson, KM_ResTileset.pas 783–789): Stone/Coal/Iron/Gold
+      // are byte amounts, IronMinable/GoldMinable the mine-placement booleans.
+      stone: typeof tile.Stone === 'number' ? tile.Stone : 0,
+      coal: typeof tile.Coal === 'number' ? tile.Coal : 0,
+      iron: typeof tile.Iron === 'number' ? tile.Iron : 0,
+      gold: typeof tile.Gold === 'number' ? tile.Gold : 0,
+      ironMinable: tile.IronMinable === true,
+      goldMinable: tile.GoldMinable === true,
     };
   }
   for (let id = 0; id < out.length; id++) {

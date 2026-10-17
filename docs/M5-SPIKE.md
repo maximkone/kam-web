@@ -207,3 +207,35 @@ sha256), then a browser match where the human can fight it on a real map.
 CityPlanner/CityBuilder/CityManagement), then worker N (military AI: ArmyManagement/ArmyAttackNew/
 ArmyDefence/Supervisor). Acceptance: `tools/aisim` deterministic AI-vs-idle skirmish + a browser
 match on a real map.
+
+### 7.4 Worker M — the AI economy half: accepted
+
+- `node tools/aisim/cli.ts --check` → `AI CHECK PASS (30000 ticks, 789 events)` (exit 0); two runs
+  identical sha256 `f62714ce8f5aada2634107349e8fac4b8bc9d3f9ae646f9ebc53e85bcdbbf91a`.
+- Frozen scenario (`MapsMP/Battle Sun` 128×128, hand 1, advanced AI on 4 hands): the AI **plans and
+  builds its economy village** — planned 8 (sawmill, coal mine, farm, woodcutters, store, school,
+  quarry ×5), placed 8, built 5, **86 road tiles built**, 7 sites dug, 4 houses activated; **39 units
+  trained** (serfs 22, builders 21, metallurgists 3, miners 3); the chain runs (tree-fell 5,
+  trunk-out 5, deliveries 149); wares trunk 5 / timber 35 / goldOre 30 / coal 30 / gold 31 / wine 30 /
+  bread 40 / sausage 20 / fish 10; `cityCompleted=false` inside the 30k-tick window (the AI is still
+  expanding — expected).
+- `npm test` **119/119** (ai.test.ts wired in — by the audit commit, verified); `npx tsc --noEmit`
+  exit 0; regressions unchanged: WALK / ECON (sha) / COMBAT (sha) / BUILD (sha) / MAPSCAN.
+- Documented simplifications (M's report): influence reach 3/5 per tile (≈40 tiles) instead of the
+  game's 10/14 (≈12) — a one-line constant if stricter fidelity is wanted (the quarry chain would
+  stall earlier); the Eye is shared/context-switched per the game's gotcha; `tpOwn` mapped from
+  `ownership > 0`; heavily simplified BuildFF; only the planner's init-point RNG draw;
+  `!SET_AI_CHARACTER` values outside the notes' "read by newAI" set are stored but unused; schools
+  are done (queue → gold → self-train → spawn → `UnitTrained`); barracks equip is worker N's
+  interface. Two Pascal bugs were found and fixed during the port (school script id 13, not 19;
+  `GetHousesToUnlock` loop condition `K <> High(HTArr)`).
+- External note: audit commit `80ac063` (by center) landed between the M5a commits and this one
+  (`serve.ts` 400 on bad percent-encoding + ai tests wired into `package.json`); verified compatible.
+
+### 7.5 Worker N — the AI military half (next)
+
+ArmyManagement (recruit/equip via barracks, group state/food), ArmyAttackNew (combat groups,
+targets, pathing), ArmyDefence (defence positions incl. the classic scripted list), Supervisor
+(alliances, attack decisions, mine division) + the `!SET_AI_DEFENSE`/`!SET_AI_ATTACK` records.
+Acceptance: `aisim` gains an attack phase (the AI equips soldiers, forms groups, attacks a second
+hand; frozen kills/house damage + sha), then a browser match on a real map.
