@@ -34,8 +34,16 @@ Chrono Divide does for Red Alert 2.
   standard formats) parse and load: `MAPSCAN CHECK PASS`, lead's independent walker matches, the
   browser picker lists them and loads Arena/Atoll/Center Castle Looting with their missions;
   workers G (loader) + H (picker/viewer); record in `docs/M3B-SPIKE.md` §7.
-- **M4 — combat slice: NEXT** (spec frozen 2026-10-17, `docs/M4-SPIKE.md`). Warriors, projectiles,
-  house damage, unit groups + orders, fog of war — the substrate the Advanced AI needs.
+- **M4 — combat slice: DONE** (accepted 2026-10-17). Warriors (melee + ranged) with the real fight
+  timing, projectiles, house damage/destruction with rubble, unit groups + the orders API the AI
+  reads, and fog of war (incl. its two sim gates); deterministic headless check (`COMBAT CHECK PASS`)
+  and playable in `/play.html` (arrows in flight, fights, burning/collapsing houses, FOW toggle).
+  Lead-verified: CDP 16/16, `npm test` 98/98; workers I (sim) + J (viewer); record in
+  `docs/M4-SPIKE.md` §7.
+- **M5 — advanced AI: NEXT** (research in `docs/M5-AI-NOTES.md`). Wave 1: construction slice (house
+  plans, builders, materials — what the AI's CityBuilder drives); wave 2: the newAI port (Eye,
+  CityPlanner/Builder/Management, Army management, Supervisor) so you can play against it on your
+  own maps.
 
 ## Quickstart (Windows, Node >= 24)
 

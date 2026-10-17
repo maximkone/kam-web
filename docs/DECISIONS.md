@@ -2,6 +2,21 @@
 
 Newest first. Only decisions the lead/owner actually made, with evidence.
 
+## 2026-10-17 — M4 accepted: combat slice (workers I + J)
+
+- Worker I (combat sim): `COMBAT CHECK PASS` deterministic (sha `09a19821…`, two runs identical),
+  `npm test` 98/98; the lead-reproduced crash (a house demolished mid-delivery crashed the next
+  tick) was fixed with uid house references + graceful delivery abandonment + worker relocation and
+  regression-tested — all frozen numbers unchanged; record in `docs/M4-SPIKE.md` §7.1.
+- Worker J (combat viewer): the lead's independent CDP run **16/16** — fog of war (inside 255 /
+  outside 0 / toggles), arrows in flight (max 6) and deaths, house HP → collapse → 4 rubble objects,
+  **200 ticks after a demolish with no crash** (the fixed path in the browser), the economy keeps
+  running (storeTrunks 30→20, events 39→470), M3b picker intact; §7.2.
+- Regressions: M0/M1/M2/M2b/M3/M3b all green; `npm test` 98/98; tsc 0.
+- Next: **M5 advanced AI** — `docs/M5-AI-NOTES.md` is the research; its gap list makes a
+  construction slice (house plans/builders/materials — what the AI's CityBuilder drives) the first
+  wave, then the newAI port itself.
+
 ## 2026-10-17 — M3b accepted: any-map loading + picker (workers G + H)
 
 - Worker G (loader): `MAPSCAN CHECK PASS (243 maps, 0 anomalies)` — 35 `Maps` + 208 `MapsMP`, 232
