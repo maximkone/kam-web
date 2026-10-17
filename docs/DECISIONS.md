@@ -2,6 +2,20 @@
 
 Newest first. Only decisions the lead/owner actually made, with evidence.
 
+## 2026-10-17 — M3b accepted: any-map loading + picker (workers G + H)
+
+- Worker G (loader): `MAPSCAN CHECK PASS (243 maps, 0 anomalies)` — 35 `Maps` + 208 `MapsMP`, 232
+  Remake + 11 standard formats, every walk exact, the 11 XOR `.dat`s decoded; the lead's independent
+  walker reproduced every total and the per-map extremes; deviations in `docs/M3B-SPIKE.md` §7.1
+  (notably `baseTerrain` — Remake maps use terrain ids > 255 on 49,123 tiles).
+- Worker H (picker/viewer): lead's CDP run **21/21** — `/maps` = 243 entries, traversal refused
+  (404), Arena / Atoll / Center Castle Looting (256×256, 8,747 layered tiles) all load and render
+  with their mission houses/units, the tutorial keeps the M3 counters; §7.2. Follow-up flagged: the
+  viewer's browser-side reader duplicates the parser (`packages/map/map.ts` imports `node:fs`) —
+  dedupe planned.
+- Regressions: M0/M1/M2/M2b/M3 all pass; `npm test` 82/82; tsc 0.
+- Next: **M4 combat** (spec `docs/M4-SPIKE.md` frozen 2026-10-17) → M5 advanced AI → M6 multiplayer.
+
 ## 2026-10-17 — M3 accepted: the economy village runs (workers E + F)
 
 - Worker E (sim core) verified by the lead: `ECON CHECK PASS` (6000 ticks; two runs identical,

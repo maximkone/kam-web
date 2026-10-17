@@ -30,8 +30,12 @@ Chrono Divide does for Red Alert 2.
   PASS`, sha256-frozen) and playable in `/play.html` (houses/roads/trees/wares/serfs, HUD event
   line). Lead-verified: CDP 22/22, `npm test` 62/62; workers E (sim core) + F (viewer); record in
   `docs/M3-SPIKE.md` §7. Two documented demo tweaks (seeded 12-tree forest + a store timber order).
-- **M3b — any-map + picker: NEXT** (spec frozen 2026-10-17, `docs/M3B-SPIKE.md`). Load any of the
-  install's 243 maps (Remake + standard formats) with its mission; map picker.
+- **M3b — any-map + picker: DONE** (accepted 2026-10-17). All 243 install maps (232 Remake + 11
+  standard formats) parse and load: `MAPSCAN CHECK PASS`, lead's independent walker matches, the
+  browser picker lists them and loads Arena/Atoll/Center Castle Looting with their missions;
+  workers G (loader) + H (picker/viewer); record in `docs/M3B-SPIKE.md` §7.
+- **M4 — combat slice: NEXT** (spec frozen 2026-10-17, `docs/M4-SPIKE.md`). Warriors, projectiles,
+  house damage, unit groups + orders, fog of war — the substrate the Advanced AI needs.
 
 ## Quickstart (Windows, Node >= 24)
 
