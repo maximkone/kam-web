@@ -50,8 +50,9 @@ export function tileWalkable(g: PassGrid, x: number, y: number): boolean {
   return g.walk[at(g, x, y)] === 1;
 }
 
-/** CheckHeightPass(aLoc, hpWalking) — KM_Terrain.pas 4866–4919, TestHeight(25). */
-export function checkHeightPass(g: PassGrid, x: number, y: number): boolean {
+/** CheckHeightPass(aLoc, hpWalking) — KM_Terrain.pas 4866–4919, TestHeight(25).
+ *  `limit` is the TKMHeightPass value: hpWalking 25, hpBuilding 18, hpBuildingMines 25 (4914–4918). */
+export function checkHeightPass(g: PassGrid, x: number, y: number, limit = 25): boolean {
   // As coded (4910–4912): out-of-map returns True (the caller's TileIsWalkable already fails).
   if (!inMapCoords(g, x, y)) return true;
   const x2 = Math.min(x + 1, g.mapX);
@@ -61,12 +62,12 @@ export function checkHeightPass(g: PassGrid, x: number, y: number): boolean {
   const p3 = g.height[at(g, x, y2)]; // H(X, Y2)
   const p4 = g.height[at(g, x2, y2)]; // H(X2, Y2)
   return (
-    Math.abs(p1 - p2) < 25 && // side 1–2
-    Math.abs(p3 - p4) < 25 && // side 3–4
-    Math.abs(p3 - p1) < 25 && // side 3–1
-    Math.abs(p4 - p2) < 50 && // side 4–2, twice as tolerant (4901)
-    Math.abs(p1 - p4) < 25 && // diagonal 1–4
-    Math.abs(p3 - p2) < 50 // diagonal 3–2, twice as tolerant (4905)
+    Math.abs(p1 - p2) < limit && // side 1–2
+    Math.abs(p3 - p4) < limit && // side 3–4
+    Math.abs(p3 - p1) < limit && // side 3–1
+    Math.abs(p4 - p2) < limit * 2 && // side 4–2, twice as tolerant (4901)
+    Math.abs(p1 - p4) < limit && // diagonal 1–4
+    Math.abs(p3 - p2) < limit * 2 // diagonal 3–2, twice as tolerant (4905)
   );
 }
 

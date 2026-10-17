@@ -60,6 +60,34 @@ const HOUSE_ID_TO_TYPE: number[] = [
   29, 14,
 ];
 
+// HOUSE_DAT_X UnlockedByHouse (KM_ResHouses.pas 234–553), indexed by TKMHouseType id (0..30): the
+// house type whose creation unlocks this one (gRes.Houses[H].ReleasedBy, 705–708).
+const UNLOCKED_BY_TYPE: number[] = [
+  0, 0, // htNone, htAny (not in the table)
+  13, 24, 16, 18, 23, // htArmorSmithy, htArmorWorkshop, htBakery, htBarracks, htButchers
+  18, 18, 18, 18, 22, // htCoalMine, htFarm, htFishermans, htGoldMine, htInn
+  18, 12, 18, 10, 8, // htIronMine, htIronSmithy, htMarket, htMetallurgists, htMill
+  19, 30, 22, 13, 8, // htQuarry, htSawmill, htSchool, htSiegeWorkshop, htStables
+  0, 8, 23, 15, 17, // htStore, htSwine, htTannery, htTownHall, htWatchTower
+  13, 18, 18, 19, // htWeaponSmithy, htWeaponWorkshop, htVineyard, htWoodcutters
+];
+
+/** HOUSE_ID_TO_TYPE (193–199) as a function: the TKMHouseType id of a script id (0 for htNone). */
+export function houseTypeId(typeId: number): number {
+  return typeId >= 0 && typeId < HOUSE_ID_TO_TYPE.length ? HOUSE_ID_TO_TYPE[typeId] : 0;
+}
+
+/**
+ * gRes.Houses[H].ReleasedBy (KM_ResHouses.pas 705–708) as a script id: the house type whose
+ * creation unlocks this one. −1 when nothing unlocks it (htNone/htAny).
+ */
+export function releasedByHouse(typeId: number): number {
+  const type = houseTypeId(typeId);
+  const unlockedBy = type >= 0 && type < UNLOCKED_BY_TYPE.length ? UNLOCKED_BY_TYPE[type] : 0;
+  if (unlockedBy <= 1) return -1;
+  return HOUSE_ID_TO_TYPE.indexOf(unlockedBy);
+}
+
 // HOUSE_DAT_X PlanYX (KM_ResHouses.pas 234–560), indexed by TKMHouseType id (2..30):
 // htArmorSmithy 2 … htWoodcutters 30. Row-major [I−1][K−1], values 0..4 (nonzero = house tile).
 const PLANYX_BY_TYPE: number[][][] = [];

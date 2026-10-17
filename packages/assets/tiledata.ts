@@ -31,12 +31,17 @@ export interface TileFlags {
   walkable: boolean;
   roadable: boolean;
   corners: number[]; // TKMTerrainKind ids, 4 per tile (index 0..3)
+  // M5 (additive, docs/M5-SPIKE.md §2.2): the Soil flag (tiles.json "Soil"), read by
+  // TileIsSoil → TileGoodForField (KM_Terrain.pas 1275–1284, 1523–1526). Optional so pre-M5
+  // TileFlags literals still typecheck; the parser always sets it.
+  soil?: boolean;
 }
 
 interface RawTile {
   ID?: number;
   Walkable?: boolean;
   Roadable?: boolean;
+  Soil?: boolean;
   CornersTerKinds?: string[];
 }
 
@@ -62,7 +67,12 @@ export function parseTilesJson(text: string): TileFlags[] {
       if (kind < 0) throw new Error(`tiles.json: tile ${id} has unknown corner kind "${name}"`);
       return kind;
     });
-    out[id] = { walkable: tile.Walkable === true, roadable: tile.Roadable === true, corners };
+    out[id] = {
+      walkable: tile.Walkable === true,
+      roadable: tile.Roadable === true,
+      corners,
+      soil: tile.Soil === true, // TileIsSoil (KM_Terrain.pas 1523–1526)
+    };
   }
   for (let id = 0; id < out.length; id++) {
     if (out[id] === undefined) throw new Error(`tiles.json: no entry for tile ID ${id}`);

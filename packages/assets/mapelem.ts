@@ -22,6 +22,35 @@ export interface MapElem {
   dontPlantNear: boolean;
   stump: number; // i8, −1 = no stump
   canBeRemoved: boolean;
+  // M5 (additive, docs/M5-SPIKE.md §2.2): KillByRoad (kbrNever/kbrNWCorner/kbrWest) — the
+  // hardcoded OBJ_KILL_BY_ROAD table (KM_ResMapElements.pas 106–123), read by
+  // RemoveObjectsKilledByRoad (KM_Terrain.pas 3309–3339). Optional so pre-M5 MapElem literals
+  // still typecheck; the parser always sets it.
+  killByRoad?: 'never' | 'nwCorner' | 'west';
+}
+
+// OBJ_KILL_BY_ROAD (KM_ResMapElements.pas 107–123), Byte values 0/1/2 (TKMKillByRoad).
+const OBJ_KILL_BY_ROAD: number[] = [
+  1, 2, 2, 2, 2, 2, 1, 1, 0, 0, 2, 2, 2, 1, 1, 1,
+  1, 2, 2, 2, 1, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1,
+  1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0,
+  0, 0, 0, 0, 0, 1, 2, 1, 1, 1, 1, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 2, 2, 0, 0, 1, 0, 1, 1, 1, 1, 0, 2, 2, 2,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+];
+
+function killByRoadName(v: number): 'never' | 'nwCorner' | 'west' {
+  return v === 1 ? 'nwCorner' : v === 2 ? 'west' : 'never';
 }
 
 const ELEMENT_SIZE = 99;
@@ -42,6 +71,7 @@ function emptyElem(): MapElem {
     dontPlantNear: false,
     stump: 0,
     canBeRemoved: false,
+    killByRoad: 'never',
   };
 }
 
@@ -63,6 +93,7 @@ export function parseMapElem(buf: Uint8Array): MapElem[] {
       dontPlantNear: readLongBool(buf, o + 90),
       stump: buf[o + 94] < 128 ? buf[o + 94] : buf[o + 94] - 256,
       canBeRemoved: readLongBool(buf, o + 95),
+      killByRoad: killByRoadName(OBJ_KILL_BY_ROAD[i]), // hardcoded table (141)
     });
   }
 
@@ -76,6 +107,7 @@ export function parseMapElem(buf: Uint8Array): MapElem[] {
     dontPlantNear: false,
     stump: -1,
     canBeRemoved: true,
+    killByRoad: killByRoadName(OBJ_KILL_BY_ROAD[63]),
   };
   return out;
 }

@@ -46,6 +46,25 @@
 //  - TreeAge is a sim field (Uint8Array) initialised from the object id like KM_Terrain.pas
 //    535–538; the .map has no TreeAge byte.
 //
+// M5a construction slice (docs/M5-SPIKE.md §1a/§2; construction.ts holds the plan stores):
+//  - Tile locks (tlNone/tlDigged/tlRoadWork/tlFieldWork/tlFenced/tlHouse) are modeled: the mission
+//    houses and built houses hold tlHouse, a WIP house starts tlFenced (KM_Houses.pas 569), the
+//    digger locks each dug cell tlDigged. tpWalk excludes tlDigged/tlHouse, tpWorker only tlHouse
+//    (KM_Terrain.pas 3773–3784, 3840–3844) — so a second `workerGrid` carries the builder's
+//    Digging passability (KM_Units.pas 2030–2034).
+//  - The construction pass runs staggered with the logistics pass: `tick mod handCount == hand`
+//    (KM_Hand.pas 2116–2120), AssignHousePlans → AssignFieldworks → AssignHouses
+//    (KM_HandConstructions.pas 1414–1417; repairs are out of v0).
+//  - FlattenTerrain (KM_Terrain.pas 4355–4468) is simplified: each of the tile's 4 corner heights
+//    is mixed halfway to the tile's corner average, then the 3×3 passability is recomputed
+//    (documented deviation: no tpElevate/recursion/lighting).
+//  - Delivery to a WIP house is the fDeliverKind = dkToConstruction path of
+//    KM_UnitTaskDelivery.pas 454–483 (phases 5/6/7 with the entrance diagonal rule); the 1.42
+//    parameter of SetActionWalkToSpot is a distance tolerance in the Pascal — the port walks to
+//    the exact tile (documented deviation).
+//  - Field plans: roads and corn fields are built (SetRoad/SetField); wine fields are out of v0
+//    (no TKMTaskBuildWine, spec §1a), so tileIsWineField always reads the (unused) wine overlay.
+//
 // Browser-safe: no node: imports.
 import type { KaMap } from '../map/map.ts';
 import type { PassGrid } from './terrain.ts';
@@ -60,7 +79,18 @@ import type { AnimLoop, UnitSpec } from '../assets/unitdat.ts';
 import type { HouseSpec } from '../assets/housedata.ts';
 import { housePlan } from '../assets/housedata.ts';
 import type { Mission } from '../mission/mission.ts';
-import { WARE_CNT, WT_TRUNK, WT_TIMBER } from '../assets/wares.ts';
+import { WARE_CNT, WT_TRUNK, WT_TIMBER, WT_STONE } from '../assets/wares.ts';
+// M5a construction slice (docs/M5-SPIKE.md §1a/§2; construction.ts holds the plan stores).
+import type {
+  BuildSite,
+  BuildState,
+  ConstructionQueries,
+  ConstructionState,
+  FieldPlan,
+  FieldType,
+  HousePlan,
+} from './construction.ts';
+import * as C from './construction.ts';
 // M4 combat systems (docs/M4-SPIKE.md; combat.ts holds the systems, this world wires them in).
 import type { CombatHouse, CombatUnit, CombatWorld, GroupState, SimGroup, SimProjectile, UnitRuntime, WarriorState } from './combat.ts';
 import {
@@ -135,6 +165,25 @@ const OBJ_NONE = 255;
 // BASE_VAL for TKMPointDirCenteredList weights (KM_CommonClasses.pas 1294).
 const BASE_VAL = 100;
 
+// TKMTileLock (KM_TerrainTypes.pas) — the M5a subset (KM_Terrain.pas 2173–2205, 3773–3844).
+export const TL_NONE = 0;
+export const TL_DIGGED = 1; // tlDigged: blocks tpWalk, still allowed for tpWorker
+export const TL_ROAD_WORK = 2; // tlRoadWork
+export const TL_FIELD_WORK = 3; // tlFieldWork
+export const TL_FENCED = 4; // tlFenced: a WIP house — tpWalk is still allowed
+export const TL_HOUSE = 5; // tlHouse: blocks tpWalk and tpWorker
+
+// The field overlay (TileOverlay toCorn/toWine essentials): TileIsCornField/TileIsWineField.
+export const FIELD_NONE = 0;
+export const FIELD_CORN = 1;
+export const FIELD_WINE = 2;
+
+// utBuilder (unit.dat record 9; UNIT_ID_TO_TYPE[9], KM_ResUnits.pas 146–149).
+export const UNIT_BUILDER = 9;
+
+// The WIP house FOW radius (KM_Houses.pas 2336).
+const HOUSE_PLAN_SIGHT = 2;
+
 // HEIGHT_MAX (used by ChooseCuttingDirection 2769–2770 to punish front cuts on a rise).
 const HEIGHT_MAX = 255;
 
@@ -156,6 +205,16 @@ export interface EconHouse {
   damage: number; // fDamage; health = max(maxHealth − damage, 0)
   destroyed: boolean; // Demolish ran; the object is removed one tick later
   fireLevel: number; // 0..8 haFire1..haFire8 sub-actions by damage level (UpdateDamage)
+  // M5a (additive): the construction slice (docs/M5-SPIKE.md §2.2/§2.3) — the viewer (worker L)
+  // reads these. Mission houses are 'done' (hbsDone) with progress = MaxHealth (KM_Houses.pas 565).
+  buildState: BuildState; // fBuildState
+  buildingProgress: number; // fBuildingProgress
+  buildSupplyWood: number; // fBuildSupplyWood
+  buildSupplyStone: number; // fBuildSupplyStone
+  buildReserve: number; // fBuildReserve (50 per ware unit, spent 5 per hit)
+  readyToBeBuilt: boolean; // fIsReadyToBeBuilt
+  woodCost: number; // gRes.Houses[type].WoodCost
+  stoneCost: number; // gRes.Houses[type].StoneCost
 }
 
 export interface EconUnit {
@@ -169,7 +228,7 @@ export interface EconUnit {
   carry: number; // ware id, -1 = none
   inside: boolean;
   homeUid: number; // 0 = none
-  taskKind: 'none' | 'goHome' | 'chop' | 'saw' | 'deliver' | 'idle';
+  taskKind: 'none' | 'goHome' | 'chop' | 'saw' | 'deliver' | 'idle' | 'buildHouseArea' | 'buildHouse' | 'buildRoad' | 'buildField';
   // M4 (additive): unit combat (docs/M4-SPIKE.md §3)
   hitPoints: number;
   groupUid: number; // 0 = none
@@ -206,15 +265,67 @@ type Task =
   | { kind: 'goHome'; phase: number }
   | { kind: 'chop'; phase: number; plan: ChopPlan | null; distant: boolean }
   | { kind: 'saw'; phase: number; phase2: number }
-  | { kind: 'deliver'; phase: number; fromUid: number; toUid: number; ware: number; demand: Demand; taken: boolean };
+  | { kind: 'deliver'; phase: number; fromUid: number; toUid: number; toUnitUid: number; ware: number; demand: Demand; taken: boolean; deliverKind: 'house' | 'construction' | 'unit' }
+  // M5a builder tasks (docs/M5-SPIKE.md §2.2): TKMTaskBuildHouseArea (:681–765),
+  // TKMTaskBuildHouse (:845–901), TKMTaskBuildRoad (:218–291), TKMTaskBuildField (:503–543).
+  | {
+      kind: 'buildHouseArea';
+      phase: number;
+      typeId: number;
+      locX: number;
+      locY: number;
+      plan: HousePlan;
+      houseUid: number;
+      houseNeedsWorker: boolean;
+      houseReadyToBuild: boolean;
+      cells: Pt[];
+      lastToDig: number;
+      closed: boolean;
+    }
+  | {
+      kind: 'buildHouse';
+      phase: number;
+      phase2: number;
+      houseUid: number;
+      site: BuildSite;
+      buildFrom: Pt | null;
+      fromDir: number;
+      cells: { x: number; y: number; dir: number }[];
+      closed: boolean;
+    }
+  | {
+      kind: 'buildRoad';
+      phase: number;
+      x: number;
+      y: number;
+      field: FieldPlan | null;
+      demandSet: boolean;
+      tileLockSet: boolean;
+      isDigged: boolean;
+      closed: boolean;
+    }
+  | {
+      kind: 'buildField';
+      phase: number;
+      phase2: number;
+      x: number;
+      y: number;
+      field: FieldPlan | null;
+      tileLockSet: boolean;
+      closed: boolean;
+    };
 
 interface Demand {
   houseUid: number; // the demand's house; the house may be destroyed/deleted later (KM_Houses Demolish)
+  unitUid: number; // M5a: a unit demand (AddDemand(nil, aUnit, ...), 0 = house demand)
   ware: number;
   slot: number; // input slot for house demands; -1 for script demands
   script: boolean;
   count: number; // script demands: remaining count
   being: number; // reserved deliveries
+  // M5a (additive): a construction demand (AddDemand(fHouse, nil, wtTimber, WoodCost, dtOnce, diHigh4),
+  // KM_UnitTaskBuild.pas 637–638) — count-based like a script demand, delivered with WareAddToBuild.
+  construction: boolean;
 }
 
 interface Offer {
@@ -313,11 +424,17 @@ export class EconomyWorld {
   readonly projectiles: SimProjectile[] = [];
   readonly fow: FogOfWar[] = []; // per hand
   houseDamageTotal = 0; // telemetry: the damage applied to houses (AddDamage amounts)
+  // M5a (additive): the construction store per hand (docs/M5-SPIKE.md §3).
+  readonly constructions: ConstructionState[] = [];
 
   private readonly map: KaMap;
   private readonly unitSpecs: UnitSpec[];
   private readonly unitStates: UnitState[] = [];
   private readonly roadOverlay: Uint8Array;
+  private readonly fieldOverlay: Uint8Array; // 0 none, 1 corn, 2 wine (TileIsCornField/TileIsWineField)
+  private readonly digOverlay: Uint8Array; // 0 none, 1..4 = toDig1..toDig4 (IncDigState)
+  private readonly tileLock: Uint8Array; // TKMTileLock per tile (TL_*)
+  private readonly workerGrid: PassGrid; // tpWorker (KM_Terrain.pas 3840–3844)
   private readonly treeAge: Uint8Array;
   private readonly houseTile: Int32Array; // house uid per tile (0 = none), for ChopTree's stamp rule
   private readonly falling = new Map<number, number>(); // tile index → fall tick
@@ -346,6 +463,9 @@ export class EconomyWorld {
     const size = (mapX + 1) * (mapY + 1);
     this.grid = buildPassGrid(o.map, o.tiles, o.elems);
     this.roadOverlay = new Uint8Array(size);
+    this.fieldOverlay = new Uint8Array(size);
+    this.digOverlay = new Uint8Array(size);
+    this.tileLock = new Uint8Array(size);
     this.treeAge = new Uint8Array(size);
     this.houseTile = new Int32Array(size);
     this.unitTile = new Int32Array(size);
@@ -360,6 +480,16 @@ export class EconomyWorld {
       elems: this.grid.elems,
       tiles: this.grid.tiles,
     };
+    this.workerGrid = {
+      mapX,
+      mapY,
+      walk: new Uint8Array(size),
+      obj: this.grid.obj,
+      height: this.grid.height,
+      elems: this.grid.elems,
+      tiles: this.grid.tiles,
+    };
+    for (let i = 0; i < this.grid.walk.length; i++) this.workerGrid.walk[i] = this.grid.walk[i];
 
     // Hand count: gHands.Count after SET_MAX_PLAYER; extended defensively if an owner appears.
     let handCount = Math.max(1, o.mission.maxPlayers);
@@ -370,6 +500,7 @@ export class EconomyWorld {
       this.offers.push([]);
       this.demands.push([]);
       this.fow.push(new FogOfWar(mapX, mapY));
+      this.constructions.push(C.createConstructionState(i, this.houseSpecs));
     }
 
     this.initTreeAges();
@@ -415,11 +546,24 @@ export class EconomyWorld {
         if (h.destroyed) continue; // deleted one tick later when pointer-free
         h.animStep += 1;
         h.workAnimStep += 1;
+        // WIP houses keep their BuildArea revealed with HOUSE_PLAN_SIGHT (KM_Houses.pas 2334–2361:
+        // `(aTick + Owner) mod FOW_PACE = 0`, FOG_OF_WAR_INC).
+        if (h.buildState !== 'done' && (this.tickNumber + hand) % FOW_PACE === 0) {
+          const fog = this.fow[hand];
+          if (fog !== undefined) {
+            for (const c of this.houseCells(h)) fog.reveal(c.x, c.y, HOUSE_PLAN_SIGHT, false);
+          }
+        }
       }
       this.removeDestroyedHouses();
       // FOW (KM_Hand.pas 2113).
       this.fow[hand].updateState(true, this.tickNumber);
-      if (this.tickNumber % this.handCount === hand) this.logistics(hand);
+      if (this.tickNumber % this.handCount === hand) {
+        // Staggered (KM_Hand.pas 2116–2120): constructions then deliveries
+        // (KM_Hand.UpdateState: fConstructions.UpdateState + fDeliveries.UpdateState).
+        this.constructionsPass(hand);
+        this.logistics(hand);
+      }
     }
     updateProjectiles(this); // after gHands (KM_Game.pas 3112)
     this.rng = rngStep(this.rng); // RunningTimer: the one draw per tick
@@ -485,7 +629,18 @@ export class EconomyWorld {
   /** Add a script demand (the demo store order; the mechanism the game's scripts use). */
   addScriptDemand(house: EconHouse, ware: number, count: number): void {
     if (ware < 0 || ware >= WARE_CNT) throw new Error(`addScriptDemand: bad ware ${ware}`);
-    this.demands[house.owner].push({ houseUid: house.uid, ware, slot: -1, script: true, count, being: 0 });
+    this.demands[house.owner].push({ houseUid: house.uid, unitUid: 0, ware, slot: -1, script: true, count, being: 0, construction: false });
+  }
+
+  /**
+   * A construction demand (KM_UnitTaskBuild.pas 637–638): `AddDemand(fHouse, nil, wtTimber,
+   * WoodCost, dtOnce, diHigh4)` + the stone one. Count-based like a script demand (dtOnce: one
+   * delivery reserved at a time), the ware lands in the build supply via WareAddToBuild.
+   */
+  addConstructionDemand(house: EconHouse, ware: number, count: number): void {
+    if (ware < 0 || ware >= WARE_CNT) throw new Error(`addConstructionDemand: bad ware ${ware}`);
+    if (count <= 0) return;
+    this.demands[house.owner].push({ houseUid: house.uid, unitUid: 0, ware, slot: -1, script: true, count, being: 0, construction: true });
   }
 
   // -------------------------------------------------------------------------------------------
@@ -537,6 +692,15 @@ export class EconomyWorld {
         damage: 0,
         destroyed: false,
         fireLevel: 0,
+        // A mission house is complete (hbsDone) with progress = MaxHealth (KM_Houses.pas 562–566).
+        buildState: 'done',
+        buildingProgress: spec !== undefined ? spec.maxHealth : 0,
+        buildSupplyWood: 0,
+        buildSupplyStone: 0,
+        buildReserve: 0,
+        readyToBeBuilt: false,
+        woodCost: spec !== undefined ? spec.woodCost : 0,
+        stoneCost: spec !== undefined ? spec.stoneCost : 0,
       };
       this.houses.push(house);
 
@@ -552,6 +716,7 @@ export class EconomyWorld {
 
       // Footprint: BuildArea nonzero cells, row I = Y − pos.Y + 4, col K = X − pos.X + 3
       // (KM_Houses.pas 1109–1123) → tile (pos.X + K − 3, pos.Y + I − 4); remove from the walk grid.
+      // A built house holds tlHouse (KM_Terrain.pas 4642–4644) — no tpWalk and no tpWorker.
       const plan = housePlan(mh.typeId);
       for (let I = 1; I <= 4; I++) {
         for (let K = 1; K <= 4; K++) {
@@ -561,6 +726,8 @@ export class EconomyWorld {
           if (!this.inMapCoords(tx, ty)) continue;
           const i = this.index(tx, ty);
           this.grid.walk[i] = 0;
+          this.workerGrid.walk[i] = 0;
+          this.tileLock[i] = TL_HOUSE;
           this.houseTile[i] = house.uid;
         }
       }
@@ -635,6 +802,7 @@ export class EconomyWorld {
       };
       this.unitStates.push(st);
       this.unitStateMap.set(unit, st);
+      if (mu.typeId === UNIT_BUILDER) C.addWorker(this.constructions[mu.owner], unit.uid); // KM_Hand.pas 508–509
       if (this.inMapCoords(mu.x, mu.y)) this.unitTile[this.index(mu.x, mu.y)] = unit.uid;
       const fog = this.fow[mu.owner];
       if (fog !== undefined) fog.reveal(mu.x, mu.y, spec.sight ?? 0, true); // Create 1288–1290
@@ -661,7 +829,7 @@ export class EconomyWorld {
       if (spec === undefined) continue;
       for (let slot = 0; slot < 4; slot++) {
         if (spec.resIn[slot] < 0) continue;
-        this.demands[h.owner].push({ houseUid: h.uid, ware: spec.resIn[slot], slot, script: false, count: 0, being: 0 });
+        this.demands[h.owner].push({ houseUid: h.uid, unitUid: 0, ware: spec.resIn[slot], slot, script: false, count: 0, being: 0, construction: false });
       }
     }
   }
@@ -874,12 +1042,14 @@ export class EconomyWorld {
     }
 
     if (st.task !== null) {
-      const res = this.runTask(u, st, st.task);
+      const task = st.task;
+      const res = this.runTask(u, st, task);
       if (res === 'continues') {
         this.refreshKind(u, st);
         return;
       }
       st.task = null;
+      this.finishTask(u, st, task); // M5a: the builder-task destructors
     }
     this.unitLogic(u, st);
     this.refreshKind(u, st);
@@ -1094,6 +1264,14 @@ export class EconomyWorld {
         return this.runSaw(u, st, task);
       case 'deliver':
         return this.runDeliver(u, st, task);
+      case 'buildHouseArea':
+        return this.runBuildHouseArea(u, st, task);
+      case 'buildHouse':
+        return this.runBuildHouse(u, st, task);
+      case 'buildRoad':
+        return this.runBuildRoad(u, st, task);
+      case 'buildField':
+        return this.runBuildField(u, st, task);
       default:
         return 'done';
     }
@@ -1382,13 +1560,13 @@ export class EconomyWorld {
   private runDeliver(
     u: EconUnit,
     st: UnitState,
-    task: { phase: number; fromUid: number; toUid: number; ware: number; demand: Demand; taken: boolean },
+    task: { phase: number; fromUid: number; toUid: number; toUnitUid: number; ware: number; demand: Demand; taken: boolean; deliverKind: 'house' | 'construction' | 'unit' },
   ): 'continues' | 'done' {
     // Houses are resolved by uid every tick: a destroyed house may be deleted from the array while
     // this task still references it (KM_HouseCollection.pas 426–436; KM_UnitTaskDelivery.pas 361).
     const from = this.houseByUid(task.fromUid);
     const to = this.houseByUid(task.toUid);
-    const toGone = to === null || to.destroyed;
+    const toGone = task.toUnitUid !== 0 ? this.unitByUid(task.toUnitUid) === null : to === null || to.destroyed;
     const fromGone = from === null || from.destroyed;
     if (toGone || (fromGone && task.phase <= 2)) {
       this.abandonDelivery(task);
@@ -1430,6 +1608,23 @@ export class EconomyWorld {
         task.phase = 5;
         return 'continues';
       case 5: {
+        if (task.deliverKind === 'unit') {
+          // KM_UnitTaskDelivery.pas 490: SetActionWalkToUnit(fToUnit, 1.42, uaWalk).
+          const target = this.unitByUid(task.toUnitUid);
+          if (target === null) {
+            this.abandonDelivery(task);
+            return 'done';
+          }
+          const tp = this.roundPos(target);
+          if (samePoint({ x: Math.round(u.posF.x), y: Math.round(u.posF.y) }, tp)) {
+            st.actionLock = 1;
+          } else if (!this.walkTo(u, st, tp)) {
+            st.actionLock = 1;
+          }
+          task.phase = 6;
+          return 'continues';
+        }
+        // KM_UnitTaskDelivery.pas 419 (dkToHouse) / 459 (dkToConstruction): walk to PointBelowEntrance.
         const target = pointBelowEntrance(to as EconHouse);
         if (samePoint({ x: Math.round(u.posF.x), y: Math.round(u.posF.y) }, target)) {
           st.actionLock = 1;
@@ -1440,15 +1635,85 @@ export class EconomyWorld {
         task.phase = 6;
         return 'continues';
       }
-      case 6:
+      case 6: {
+        if (task.deliverKind === 'unit') {
+          // KM_UnitTaskDelivery.pas 491–513: hand the ware to the builder; a road/wine builder that
+          // is still digging is waited for, otherwise his task phase is advanced by one.
+          const target = this.unitByUid(task.toUnitUid);
+          if (target === null) {
+            this.abandonDelivery(task);
+            return 'done';
+          }
+          const tp = this.roundPos(target);
+          const spot = { x: Math.round(u.posF.x), y: Math.round(u.posF.y) };
+          const far = C.diagDistance(u.posF.x, u.posF.y, target.posF.x, target.posF.y) > 1.5; // (493)
+          if (!samePoint(spot, tp) || far) {
+            if (!this.walkTo(u, st, tp)) st.actionLock = 1;
+            return 'continues'; // retry phase 6 next tick
+          }
+          const tst = this.unitStateMap.get(target);
+          if (tst !== undefined && tst.task !== null) {
+            const tt = tst.task;
+            const waiting =
+              (tt.kind === 'buildRoad' && tt.phase < 4) || (tt.kind === 'buildField' && tt.phase < 3);
+            if (waiting) {
+              this.setLockedStay(u, st, 5, false); // Wait until the worker finishes digging
+              return 'continues'; // phase 6 again
+            }
+            tt.phase += 1; // fToUnit.Task.Phase := fToUnit.Task.Phase + 1
+            this.setLockedStay(target, tst, 0, true); // SetActionLockedStay(0, uaWork1)
+          }
+          u.carry = -1;
+          task.demand.being -= 1;
+          if (task.demand.script) task.demand.count -= 1;
+          this.emit('ware-delivered', `ware=${task.ware} unit#${task.toUnitUid}`);
+          this.setLockedStay(u, st, 5, false); // Pause briefly (like handing over the ware)
+          task.phase = 7;
+          return 'continues';
+        }
+        if (task.deliverKind === 'construction') {
+          // 460–471: if a builder is hitting the house from the entrance, bring the ware diagonally
+          // to the entrance tile, else walk to PointBelowEntrance (the serf is usually already there).
+          const below = pointBelowEntrance(to as EconHouse);
+          const builder = this.builderHittingAt(below.x, below.y, u.owner);
+          const target = builder ? (to as EconHouse).entrance : below;
+          const spot = { x: Math.round(u.posF.x), y: Math.round(u.posF.y) };
+          if (samePoint(spot, target)) {
+            st.actionLock = 1;
+          } else if (!this.walkTo(u, st, target)) {
+            st.actionLock = 1; // the Pascal's 1.42-tolerance walk just stops; the ware still lands
+          }
+          task.phase = 7;
+          return 'continues';
+        }
         this.goIn(u, st, to as EconHouse);
         task.phase = 7;
         return 'continues';
-      case 7:
+      }
+      case 7: {
+        if (task.deliverKind === 'unit') {
+          // (527–553): after handing over to a builder the serf just stops; phase 8 ends the task.
+          this.setUnlockedStay(u, st, 0); // SetActionStay(0, uaWalk)
+          task.phase = 8;
+          return 'continues';
+        }
+        if (task.deliverKind === 'construction') {
+          // 472–481: WareAddToBuild(Carry) + GaveDemand + AbandonDelivery + SetActionStay(1, uaWalk).
+          this.wareAddToBuild(to as EconHouse, task.ware);
+          u.carry = -1;
+          task.demand.being -= 1;
+          if (task.demand.script) task.demand.count -= 1;
+          this.emit('ware-delivered', `ware=${task.ware} house#${(to as EconHouse).uid}`);
+          this.setUnlockedStay(u, st, 1);
+          task.phase = 8;
+          return 'continues';
+        }
         this.setLockedStay(u, st, 5, false);
         task.phase = 8;
         return 'continues';
+      }
       case 8: {
+        if (task.deliverKind === 'construction' || task.deliverKind === 'unit') return 'done';
         // WareAddToIn + CarryTake + GaveDemand (422–449).
         this.addToIn(to as EconHouse, task.ware);
         u.carry = -1;
@@ -1646,9 +1911,20 @@ export class EconomyWorld {
   // Logistics (v0 rule, spec 2.7)
 
   private demandAvailable(d: Demand): number {
+    if (d.unitUid !== 0) {
+      // A unit demand (the road builder's stone, KM_UnitTaskBuild.pas 241): the unit must still
+      // exist and want the ware; RemDemand drops the entry when the task ends (:175–176).
+      const u = this.unitByUid(d.unitUid);
+      if (u === null || u.dead) return 0;
+      // dtOnce (1199): a reserved delivery blocks the next one.
+      return d.being > 0 ? 0 : Math.max(d.count - d.being, 0);
+    }
     if (d.script) {
       const h = this.houseByUid(d.houseUid);
       if (h === null || h.destroyed) return 0;
+      // Construction demands are dtOnce too (one reserved delivery at a time, 1199) and a WIP
+      // house always accepts (1229–1231). Plain script demands keep the v0 count rule.
+      if (d.construction) return d.being > 0 ? 0 : Math.max(d.count - d.being, 0);
       return Math.max(d.count - d.being, 0);
     }
     const h = this.houseByUid(d.houseUid);
@@ -1709,16 +1985,31 @@ export class EconomyWorld {
         if (offerHouse === null || offerHouse.destroyed) continue;
         const dist = distances(offerHouse);
 
-        // Nearest valid demand by road distance (roadGrid BFS).
+        // Nearest valid demand by road distance (roadGrid BFS); a unit demand uses the walk route
+        // (KM_HandLogistics.pas 1223–1226) and the diagonal metric as its v0 bid.
         let bestDemand: Demand | null = null;
         let bestDist = Number.POSITIVE_INFINITY;
         for (const d of demands) {
           if (d.ware !== offer.ware) continue;
-          if (d.houseUid === offer.houseUid) continue; // no same-house deliveries
+          if (d.houseUid === offer.houseUid && d.unitUid === 0) continue; // no same-house deliveries
           if (this.demandAvailable(d) <= 0) continue;
+          if (d.unitUid !== 0) {
+            const target = this.unitByUid(d.unitUid);
+            if (target === null || target.dead) continue;
+            const tp = this.roundPos(target);
+            if (!this.routeCanBeMade(pointBelowEntrance(offerHouse), tp)) continue; // tpWalk route
+            const dd = euclid(pointBelowEntrance(offerHouse), tp);
+            if (dd < bestDist) {
+              bestDist = dd;
+              bestDemand = d;
+            }
+            continue;
+          }
           const dHouse = this.houseByUid(d.houseUid);
           if (dHouse === null || dHouse.destroyed) continue;
-          if (offerHouse.typeId === 11 && dHouse.typeId === 11) continue; // no store→store (v0)
+          // No store→store (v0) — except into a WIP store (KM_HandLogistics.pas 1267–1270: a store
+          // that is still being built accepts building materials from another store).
+          if (offerHouse.typeId === 11 && dHouse.typeId === 11 && dHouse.buildState === 'done') continue;
           const target = pointBelowEntrance(dHouse);
           const dd = dist[this.index(target.x, target.y)];
           if (dd < 0) continue; // no road route
@@ -1749,24 +2040,33 @@ export class EconomyWorld {
         bestDemand.being += 1;
         const su = this.units[bestSerf];
         const sst = this.unitStates[bestSerf];
+        const targetHouse = bestDemand.unitUid !== 0 ? null : this.houseByUid(bestDemand.houseUid);
+        const deliverKind: 'house' | 'construction' | 'unit' =
+          bestDemand.unitUid !== 0
+            ? 'unit'
+            : targetHouse !== null && targetHouse.buildState !== 'done'
+              ? 'construction'
+              : 'house';
         sst.task = {
           kind: 'deliver',
           phase: 0,
           fromUid: offer.houseUid,
-          toUid: bestDemand.houseUid,
+          toUid: bestDemand.unitUid !== 0 ? 0 : bestDemand.houseUid,
+          toUnitUid: bestDemand.unitUid,
           ware: offer.ware,
           demand: bestDemand,
           taken: false,
+          // fDeliverKind is decided when the task is created (KM_UnitTaskDelivery.pas 81–86, 105).
+          deliverKind,
         };
         sst.walk = null;
         sst.actionLock = 0;
         sst.locked = false;
         su.action = 'stay';
         su.taskKind = 'deliver';
-        const targetHouse = this.houseByUid(bestDemand.houseUid);
         this.emit(
           'delivery-assigned',
-          `ware=${offer.ware} house#${offerHouse.uid}->house#${targetHouse !== null ? targetHouse.uid : 0}`,
+          `ware=${offer.ware} house#${offerHouse.uid}->${bestDemand.unitUid !== 0 ? `unit#${bestDemand.unitUid}` : `house#${targetHouse !== null ? targetHouse.uid : 0}`}`,
         );
         const at = idle.indexOf(bestSerf);
         if (at >= 0) idle.splice(at, 1);
@@ -1962,6 +2262,1267 @@ export class EconomyWorld {
     const tmp2 = mix(h(x2, y2), h(x1, y2), fx);
     return mix(tmp2, tmp1, fy);
   }
+
+  // =============================================================================================
+  // M5a construction slice (docs/M5-SPIKE.md §1a/§2): the world side of packages/sim/construction.ts
+
+  // ---- ConstructionQueries (construction.ts) --------------------------------------------------
+
+  constructionState(hand: number): ConstructionState {
+    const state = this.constructions[hand];
+    if (state === undefined) throw new Error(`constructionState: no hand ${hand} (handCount ${this.handCount})`);
+    return state;
+  }
+
+  houseSpecOf(typeId: number): HouseSpec | undefined {
+    return this.houseSpecs[typeId];
+  }
+
+  /** TileInMapCoords(x, y, inset) (KM_Terrain.pas 1130–1134). */
+  tileInMapCoordsInset(x: number, y: number, inset: number): boolean {
+    return x >= 1 + inset && x <= this.map.mapX - 1 - inset && y >= 1 + inset && y <= this.map.mapY - 1 - inset;
+  }
+
+  /** TileIsCornField. */
+  tileHasCornField(x: number, y: number): boolean {
+    if (!this.inMapCoords(x, y)) return false;
+    return this.fieldOverlay[this.index(x, y)] === FIELD_CORN;
+  }
+
+  /** TileIsWineField (no wine fields are built in v0; the overlay stays empty). */
+  tileHasWineField(x: number, y: number): boolean {
+    if (!this.inMapCoords(x, y)) return false;
+    return this.fieldOverlay[this.index(x, y)] === FIELD_WINE;
+  }
+
+  /** TileHasRoad. */
+  tileHasRoad(x: number, y: number): boolean {
+    return this.isRoadTile(x, y);
+  }
+
+  /** tpMakeRoads at a tile (KM_Terrain.pas 3808–3813) — the CanAddField(ftRoad) check. */
+  tileMakeRoads(x: number, y: number): boolean {
+    if (!this.inMapCoords(x, y)) return false;
+    const at = this.index(x, y);
+    const flags = this.grid.tiles[this.terrainId(x, y)];
+    if (flags === undefined || !flags.roadable) return false;
+    if (this.grid.elems[this.grid.obj[at]].allBlocked) return false;
+    if (this.tileLock[at] !== TL_NONE) return false;
+    if (this.roadOverlay[at] === 1) return false;
+    return checkHeightPass(this.grid, x, y);
+  }
+
+  /** TileGoodForField (KM_Terrain.pas 1275–1284). */
+  tileGoodForField(x: number, y: number): boolean {
+    if (!this.inMapCoords(x, y)) return false;
+    const at = this.index(x, y);
+    const flags = this.grid.tiles[this.terrainId(x, y)];
+    if (flags === undefined || flags.soil !== true) return false;
+    if (this.grid.elems[this.grid.obj[at]].allBlocked) return false;
+    if (this.tileLock[at] !== TL_NONE) return false;
+    if (this.roadOverlay[at] === 1) return false; // ROAD_LIKE_OVERLAYS
+    if (this.fieldOverlay[at] !== FIELD_NONE) return false;
+    return checkHeightPass(this.grid, x, y);
+  }
+
+  /** tpBuild at a tile (KM_Terrain.pas 3792–3806). */
+  tileBuildable(x: number, y: number): boolean {
+    if (!this.tileInMapCoordsInset(x, y, 1)) return false;
+    const at = this.index(x, y);
+    const flags = this.grid.tiles[this.terrainId(x, y)];
+    if (flags === undefined || !flags.roadable) return false;
+    if (this.tileHasCornField(x, y) || this.tileHasWineField(x, y)) return false;
+    if (this.tileLock[at] !== TL_NONE) return false;
+    if (!checkHeightPass(this.grid, x, y, 18)) return false; // hpBuilding (KM_Terrain.pas 4916)
+    // hasHousesNearTile (3785–3790): no house lock anywhere in the 3×3.
+    for (let i = -1; i <= 1; i++) {
+      for (let k = -1; k <= 1; k++) {
+        if (!this.inMapCoords(x + k, y + i)) continue;
+        const lock = this.tileLock[this.index(x + k, y + i)];
+        if (lock === TL_FENCED || lock === TL_DIGGED || lock === TL_HOUSE) return false;
+      }
+    }
+    // Only OBJ_NONE or removable objects (3804–3806).
+    const obj = this.grid.obj[at];
+    if (obj !== OBJ_NONE && !this.grid.elems[obj].canBeRemoved) return false;
+    return true;
+  }
+
+  /** RouteCanBeMade(a, b, tpWalk) — TKMUnit.CanWalkTo(aTo, 0). */
+  canWalkTo(fromX: number, fromY: number, toX: number, toY: number): boolean {
+    return this.routeCanBeMade({ x: fromX, y: fromY }, { x: toX, y: toY });
+  }
+
+  private terrainId(x: number, y: number): number {
+    return this.map.tiles[((y - 1) * this.map.mapX + (x - 1)) * 4];
+  }
+
+  // ---- the frozen M5b plan API (docs/M5-SPIKE.md §3) ------------------------------------------
+
+  /** A fresh uid from the tracker (gUIDTracker.GetNewUID). */
+  nextUid(): number {
+    return this.uidCounter++;
+  }
+
+  /** CanAddHousePlan (KM_Hand.pas:1081–1115); (x, y) is the entrance. */
+  canAddHousePlan(hand: number, typeId: number, x: number, y: number): boolean {
+    return C.canAddHousePlan(this, hand, typeId, x, y);
+  }
+
+  /** AddHousePlan (KM_Hand.pas:1294–1307); (x, y) is the entrance, the stored Loc is shifted. */
+  addHousePlan(hand: number, typeId: number, x: number, y: number): HousePlan {
+    return C.addHousePlan(this, hand, typeId, x, y, this.uidCounter++);
+  }
+
+  /** RemHousePlan (KM_Hand.pas:1338–1350) + RemPlan (KM_HandConstructions.pas:827–843). */
+  remHousePlan(hand: number, x: number, y: number): HousePlan | null {
+    const plan = C.tryGetPlan(this, hand, x, y);
+    if (plan === null) return null;
+    this.cancelPlanTask(hand, plan); // Worker.CancelTask runs first (:838–839)
+    C.closePlan(plan);
+    return plan;
+  }
+
+  /** HasHousePlan (KM_Hand.pas:1310–1313). */
+  hasHousePlan(hand: number, x: number, y: number): boolean {
+    return C.tryGetPlan(this, hand, x, y) !== null;
+  }
+
+  /** CanAddFieldPlan (KM_Hand.pas:1052–1058). */
+  canAddFieldPlan(hand: number, x: number, y: number, fieldType: FieldType): boolean {
+    return C.canAddFieldPlan(this, hand, x, y, fieldType);
+  }
+
+  /** AddField (KM_HandConstructions.pas:515–537); the caller checks canAddFieldPlan. */
+  addFieldPlan(hand: number, x: number, y: number, fieldType: FieldType): FieldPlan {
+    return C.addFieldPlan(this, hand, x, y, fieldType);
+  }
+
+  /** RemFieldPlan (:562–575) + KM_Hand.RemFieldPlan (:1354–1373). */
+  remFieldPlan(hand: number, x: number, y: number): FieldPlan | null {
+    const state = this.constructionState(hand);
+    for (const f of state.fields) {
+      if (f.status === 'empty' || f.x !== x || f.y !== y) continue;
+      this.cancelFieldTask(hand, f);
+      C.closeField(f);
+      return f;
+    }
+    return null;
+  }
+
+  /** HasField (KM_HandConstructions.pas:579–591). */
+  hasFieldPlan(hand: number, x: number, y: number): FieldType {
+    return C.hasFieldPlan(this, hand, x, y);
+  }
+
+  /** FieldCount (:460–468). */
+  fieldPlanCount(hand: number, fieldType: FieldType): number {
+    return C.fieldCount(this.constructionState(hand), fieldType);
+  }
+
+  /** GetPlansWoodDemands (:1432–1440) — what the AI reads. */
+  plansWoodDemands(hand: number): number {
+    return C.plansWoodDemands(this.constructionState(hand));
+  }
+
+  /** GetPlansStoneDemands (:1421–1429). */
+  plansStoneDemands(hand: number): number {
+    return C.plansStoneDemands(this.constructionState(hand));
+  }
+
+  /** HouseCanBuild (KM_HandLocks.pas:87–95), the hlDefault case (v0 has no mission locks). */
+  houseCanBuild(hand: number, typeId: number): boolean {
+    return C.houseCanBuild(this.constructionState(hand).locks, typeId);
+  }
+
+  /** The ready-to-build site slot of a house, or null (TKMHouseList lookup by house). */
+  siteOf(houseUid: number): BuildSite | null {
+    const h = this.houseByUid(houseUid);
+    if (h === null) return null;
+    return C.siteOf(this.constructionState(h.owner), houseUid);
+  }
+
+  // ---- build-state readers (KM_Houses.pas) ----------------------------------------------------
+
+  houseIsComplete(h: EconHouse): boolean {
+    return C.isComplete(h);
+  }
+
+  houseIsStone(h: EconHouse): boolean {
+    return C.isStone(h);
+  }
+
+  houseCheckResToBuild(h: EconHouse): boolean {
+    return C.checkResToBuild(h);
+  }
+
+  houseBuildWoodDelivered(h: EconHouse): number {
+    return C.buildWoodDelivered(h);
+  }
+
+  houseBuildStoneDelivered(h: EconHouse): number {
+    return C.buildStoneDelivered(h);
+  }
+
+  houseBuildResourceDelivered(h: EconHouse): number {
+    return C.buildResourceDelivered(h);
+  }
+
+  // ---- WIP houses + terrain (KM_Houses.pas / KM_Terrain.pas) ----------------------------------
+
+  /** TKMHand.AddHouseWIP (KM_HouseCollection.pas:144–147): a hbsNoGlyph house on fenced tiles. */
+  private addHouseWIP(typeId: number, locX: number, locY: number, owner: number): EconHouse {
+    const spec = this.houseSpecs[typeId];
+    const entrance = { x: locX + (spec !== undefined ? spec.entranceDx : 0), y: locY };
+    const house: EconHouse = {
+      uid: this.uidCounter++,
+      typeId,
+      owner,
+      x: locX,
+      y: locY,
+      entrance,
+      state: 'empty',
+      wareIn: [0, 0, 0, 0],
+      wareOut: [0, 0, 0, 0],
+      workerUid: 0,
+      animStep: 0,
+      workAnimStep: 0,
+      maxHealth: spec !== undefined ? spec.maxHealth : 0,
+      damage: 0,
+      destroyed: false,
+      fireLevel: 0,
+      buildState: 'noGlyph',
+      buildingProgress: 0,
+      buildSupplyWood: 0,
+      buildSupplyStone: 0,
+      buildReserve: 0,
+      readyToBeBuilt: false,
+      woodCost: spec !== undefined ? spec.woodCost : 0,
+      stoneCost: spec !== undefined ? spec.stoneCost : 0,
+    };
+    this.houses.push(house);
+    const isStore = typeId === 11;
+    this.houseStateMap.set(house.uid, {
+      spec,
+      stock: isStore ? new Int32Array(WARE_CNT) : null,
+      workerUid: 0,
+      being: [0, 0, 0, 0],
+      isStore,
+    });
+    this.setHouseTerrain(house, 'fence'); // KM_Houses.pas 569 (hbsNoGlyph → hsFence)
+    this.emit('house-wip', `house#${house.uid} type=${typeId} (${locX},${locY})`);
+    return house;
+  }
+
+  /**
+   * SetHouse (KM_Terrain.pas 4611–4676) for the M5a stages: 'fence' (a WIP house, tlFenced),
+   * 'built' (tlHouse + the door cell becomes road, 4642–4648) and 'none' (demolish).
+   */
+  private setHouseTerrain(h: EconHouse, stage: 'fence' | 'built' | 'none'): void {
+    const plan = housePlan(h.typeId);
+    for (let i = 1; i <= 4; i++) {
+      for (let k = 1; k <= 4; k++) {
+        if (plan[i - 1][k - 1] === 0) continue;
+        const tx = h.x + k - 3;
+        const ty = h.y + i - 4;
+        if (!this.inMapCoords(tx, ty)) continue;
+        const at = this.index(tx, ty);
+        if (stage === 'none') {
+          this.tileLock[at] = TL_NONE;
+          this.houseTile[at] = 0;
+        } else {
+          this.tileLock[at] = stage === 'fence' ? TL_FENCED : TL_HOUSE;
+          this.houseTile[at] = h.uid;
+          if (stage === 'built' && plan[i - 1][k - 1] === 2 && this.roadOverlay[at] === 0) {
+            this.roadOverlay[at] = 1; // the door cell (4647–4648)
+            this.roadTileCount += 1;
+          }
+        }
+        this.recomputeWalkTile(tx, ty);
+      }
+    }
+    this.walkConnectDirty = true;
+  }
+
+  /** SetHouse(hsBuilt, flatten) (KM_Houses.pas 877–878): flatten + clear objects, then tlHouse. */
+  private setHouseBuilt(h: EconHouse): void {
+    for (const c of this.houseCells(h)) {
+      this.flattenTerrain(c.x, c.y);
+      this.removeObject(c.x, c.y);
+    }
+    this.setHouseTerrain(h, 'built');
+    this.emit('house-terrain-built', `house#${h.uid}`);
+  }
+
+  /**
+   * FlattenTerrain (KM_Terrain.pas 4355–4468), simplified (documented deviation): each of the
+   * tile's 4 corner heights is mixed halfway toward the tile's corner average (Mix(avg, h, 0.5),
+   * 4435–4454), then the 3×3 passability is recomputed (4464).
+   */
+  private flattenTerrain(x: number, y: number): void {
+    if (!this.inMapCoords(x, y)) return;
+    const x2 = Math.min(x + 1, this.map.mapX);
+    const y2 = Math.min(y + 1, this.map.mapY);
+    const p = [this.height(x, y), this.height(x2, y), this.height(x, y2), this.height(x2, y2)];
+    const avg = Math.round((p[0] + p[1] + p[2] + p[3]) / 4);
+    this.setHeight(x, y, Math.round(0.5 * (p[0] + avg)));
+    this.setHeight(x2, y, Math.round(0.5 * (p[1] + avg)));
+    this.setHeight(x, y2, Math.round(0.5 * (p[2] + avg)));
+    this.setHeight(x2, y2, Math.round(0.5 * (p[3] + avg)));
+    this.recomputeWalkAround(x, y);
+  }
+
+  private height(x: number, y: number): number {
+    return this.grid.height[this.index(x, y)];
+  }
+
+  private setHeight(x: number, y: number, h: number): void {
+    if (x < 0 || x > this.map.mapX || y < 0 || y > this.map.mapY) return;
+    this.grid.height[this.index(x, y)] = clamp(h, 0, 255);
+  }
+
+  /** RemoveObject (KM_Terrain.pas 3295–3306). */
+  private removeObject(x: number, y: number): void {
+    if (!this.inMapCoords(x, y)) return;
+    const at = this.index(x, y);
+    if (this.grid.obj[at] === OBJ_NONE) return;
+    const blockedDiagonal = this.grid.elems[this.grid.obj[at]].diagonalBlocked;
+    this.grid.obj[at] = OBJ_NONE;
+    this.treeAge[at] = 0;
+    if (blockedDiagonal) this.walkConnectDirty = true;
+  }
+
+  /** SetRoad (KM_Terrain.pas 2410–2419): the toRoad overlay + the road grid. */
+  private setRoad(x: number, y: number, _owner: number): void {
+    if (!this.inMapCoords(x, y)) return;
+    const at = this.index(x, y);
+    if (this.roadOverlay[at] === 0) this.roadTileCount += 1;
+    this.roadOverlay[at] = 1;
+    // SetRoads removes wine/corn objects (KM_Terrain.pas 2220–2227).
+    if (this.grid.elems[this.grid.obj[at]].wineOrCorn) {
+      this.grid.obj[at] = OBJ_NONE;
+      this.treeAge[at] = 0;
+    }
+    this.recomputeWalkAround(x, y);
+    this.emit('road-built', `(${x},${y})`);
+  }
+
+  /** SetField(aLoc, Owner, ftCorn) (KM_Terrain.pas 3377–3447): the corn overlay. */
+  private setFieldCorn(x: number, y: number, _owner: number): void {
+    if (!this.inMapCoords(x, y)) return;
+    const at = this.index(x, y);
+    this.fieldOverlay[at] = FIELD_CORN;
+    this.recomputeWalkAround(x, y);
+    this.emit('field-built', `corn (${x},${y})`);
+  }
+
+  /** WareAddToBuild (KM_Houses.pas 1805–1817): timber/stone only, clamped to the costs. */
+  wareAddToBuild(h: EconHouse, ware: number): void {
+    if (h.destroyed) return;
+    if (h.buildingProgress > 0 || h.buildSupplyWood > 0 || h.buildSupplyStone > 0) h.readyToBeBuilt = true;
+    if (ware === WT_TIMBER) h.buildSupplyWood = clamp(h.buildSupplyWood + 1, 0, h.woodCost);
+    else if (ware === WT_STONE) h.buildSupplyStone = clamp(h.buildSupplyStone + 1, 0, h.stoneCost);
+    else throw new Error(`wareAddToBuild: a WIP house is not supposed to receive ware ${ware}`);
+    this.emit('build-supply', `house#${h.uid} wood=${h.buildSupplyWood} stone=${h.buildSupplyStone}`);
+  }
+
+  /** IncBuildingProgress (KM_Houses.pas 1234–1271): +5 per hit, +50 reserve per ware unit. */
+  private incBuildingProgress(h: EconHouse): void {
+    if (C.isComplete(h)) return;
+    h.readyToBeBuilt = true; // SetIsReadyToBeBuilt(True) (1238)
+    if (h.buildState === 'wood' && h.buildReserve === 0) {
+      h.buildSupplyWood -= 1;
+      h.buildReserve += 50;
+    }
+    if (h.buildState === 'stone' && h.buildReserve === 0) {
+      h.buildSupplyStone -= 1;
+      h.buildReserve += 50;
+    }
+    h.buildingProgress += 5; // (1251)
+    h.buildReserve -= 5; // (1252)
+    if (h.buildState === 'wood' && h.buildingProgress === h.woodCost * 50) h.buildState = 'stone'; // (1254–1256)
+    if (h.buildState === 'stone' && h.buildingProgress - h.woodCost * 50 === h.stoneCost * 50) {
+      // (1258–1269): hbsDone + Activate(True).
+      h.buildState = 'done';
+      h.readyToBeBuilt = false;
+      this.activate(h, true);
+    }
+  }
+
+  /**
+   * Activate (KM_Houses.pas 669–717): the lock release chain, the FOW reveal by BuildArea with the
+   * house Sight, the entrance diagonal object fix and AddDemandsOnActivate.
+   */
+  private activate(h: EconHouse, wasBuilt: boolean): void {
+    C.houseCreated(this.constructionState(h.owner).locks, h.typeId); // (684)
+    const spec = this.houseSpecs[h.typeId];
+    const fog = this.fow[h.owner];
+    if (fog !== undefined) {
+      for (const c of this.houseCells(h)) fog.reveal(c.x, c.y, spec !== undefined ? spec.sight ?? 0 : 0, true); // (689–694)
+    }
+    // CurrentAction := flag sub-actions (697–698) — a viewer concern (worker L).
+    this.addDemandsOnActivate(h); // (701)
+    if (wasBuilt) this.clearEntranceDiagonalObjects(h); // (703–716)
+    this.emit('house-activated', `house#${h.uid} type=${h.typeId} wasBuilt=${wasBuilt}`);
+  }
+
+  /** AddDemandsOnActivate (KM_Houses.pas 649–666): every real WareInput slot gets a demand. */
+  private addDemandsOnActivate(h: EconHouse): void {
+    const spec = this.houseSpecs[h.typeId];
+    if (spec === undefined) return;
+    for (let slot = 0; slot < 4; slot++) {
+      if (spec.resIn[slot] < 0) continue;
+      this.demands[h.owner].push({
+        houseUid: h.uid,
+        unitUid: 0,
+        ware: spec.resIn[slot],
+        slot,
+        script: false,
+        count: 0,
+        being: 0,
+        construction: false,
+      });
+    }
+  }
+
+  /** The Activate diagonal fix (703–716): clear non-tree objects blocking the entrance diagonals. */
+  private clearEntranceDiagonalObjects(h: EconHouse): void {
+    const p1 = { x: h.entrance.x - 1, y: h.entrance.y + 1 };
+    const p2 = { x: p1.x + 2, y: p1.y };
+    if (
+      !this.canWalkDiagonal(h.entrance.x, h.entrance.y, p1.x, p1.y) &&
+      this.objectShouldBeCleared(p1.x + 1, p1.y)
+    ) {
+      this.removeObject(p1.x + 1, p1.y);
+    }
+    if (!this.canWalkDiagonal(h.entrance.x, h.entrance.y, p2.x, p2.y) && this.objectShouldBeCleared(p2.x, p2.y)) {
+      this.removeObject(p2.x, p2.y);
+    }
+  }
+
+  private objectShouldBeCleared(x: number, y: number): boolean {
+    if (!this.inMapCoords(x, y)) return false;
+    const obj = this.grid.obj[this.index(x, y)];
+    if (isChopableObj(obj)) return false; // do not clear choppable trees (KM_Houses.pas 673–676)
+    if (this.grid.elems[obj].wineOrCorn) return false;
+    return true;
+  }
+
+  /** TKMHand.UnitsHitTest (KM_Hand.pas 364–373): the builder hitting the house from the entrance. */
+  private builderHittingAt(x: number, y: number, owner: number): EconUnit | null {
+    const u = this.unitAtTile(x, y);
+    if (u === null || u.dead || u.owner !== owner || u.type !== UNIT_BUILDER) return null;
+    const st = this.unitStateMap.get(u);
+    if (st === undefined || st.task === null || st.task.kind !== 'buildHouse') return null;
+    if (st.task.phase < 1) return null; // (Worker.Task.Phase >= 1, KM_UnitTaskDelivery.pas 465)
+    return u;
+  }
+
+  // ---- the staggered construction pass (KM_HandConstructions.pas 1389–1418) -------------------
+
+  /**
+   * TKMHandConstructions.UpdateState: HouseList.UpdateState + RemoveExtraWorkers, then
+   * AssignHousePlans → AssignFieldworks → AssignHouses (repairs are out of v0, spec §1a).
+   */
+  private constructionsPass(hand: number): void {
+    const state = this.constructionState(hand);
+    C.removeExtraSites(state, (uid) => {
+      const h = this.houseByUid(uid);
+      return h === null || h.destroyed || C.isComplete(h);
+    });
+    C.removeExtraWorkers(state, (uid) => {
+      const u = this.unitByUid(uid);
+      return u === null || u.dead;
+    });
+    this.assignHousePlans(hand, state);
+    this.assignFieldworks(hand, state);
+    this.assignHouses(hand, state);
+  }
+
+  private roundPos(u: EconUnit): Pt {
+    return { x: Math.round(u.posF.x), y: Math.round(u.posF.y) };
+  }
+
+  /** IsIdle (KM_Units.pas 2428–2431): no task and an unlocked stay action. */
+  private isIdleBuilder(uid: number): boolean {
+    const u = this.unitByUid(uid);
+    if (u === null || u.dead) return false;
+    const st = this.unitStateMap.get(u);
+    if (st === undefined) return false;
+    return st.task === null && st.walk === null && !st.locked;
+  }
+
+  private idleBuilderCount(hand: number): number {
+    let n = 0;
+    for (const uid of this.constructionState(hand).workers) if (this.isIdleBuilder(uid)) n += 1;
+    return n;
+  }
+
+  /** GetBestWorker (:1253–1270): the nearest idle builder that can walk to the point. */
+  private getBestWorker(hand: number, x: number, y: number): EconUnit | null {
+    let best: EconUnit | null = null;
+    let bestBid = Number.POSITIVE_INFINITY;
+    for (const uid of this.constructionState(hand).workers) {
+      if (!this.isIdleBuilder(uid)) continue;
+      const u = this.unitByUid(uid);
+      if (u === null) continue;
+      const from = this.roundPos(u);
+      if (!this.canWalkTo(from.x, from.y, x, y)) continue;
+      const bid = C.diagDistance(from.x, from.y, x, y);
+      if (bid < bestBid) {
+        bestBid = bid;
+        best = u;
+      }
+    }
+    return best;
+  }
+
+  /** AssignHousePlans (:1301–1326). */
+  private assignHousePlans(hand: number, state: ConstructionState): void {
+    if (this.idleBuilderCount(hand) === 0) return;
+    const jobs = C.openPlanCount(state);
+    if (jobs === 0) return;
+    if (jobs > this.idleBuilderCount(hand)) {
+      for (const uid of state.workers.slice()) {
+        if (!this.isIdleBuilder(uid)) continue;
+        const u = this.unitByUid(uid);
+        if (u === null) continue;
+        const from = this.roundPos(u);
+        const plan = C.bestBidPlan(this, hand, from.x, from.y);
+        if (plan !== null) this.givePlanTask(u, plan);
+      }
+    } else {
+      for (const plan of state.plans) {
+        if (plan.status !== 'open') continue;
+        const worker = this.getBestWorker(hand, plan.x, plan.y);
+        if (worker !== null) this.givePlanTask(worker, plan);
+      }
+    }
+  }
+
+  /** AssignFieldworks (:1273–1298). Wine field plans are not assigned (out of v0, spec §1a). */
+  private assignFieldworks(hand: number, state: ConstructionState): void {
+    if (this.idleBuilderCount(hand) === 0) return;
+    const jobs = state.fields.filter((f) => f.status === 'open' && this.fieldHasTask(f)).length;
+    if (jobs === 0) return;
+    if (jobs > this.idleBuilderCount(hand)) {
+      for (const uid of state.workers.slice()) {
+        if (!this.isIdleBuilder(uid)) continue;
+        const u = this.unitByUid(uid);
+        if (u === null) continue;
+        const from = this.roundPos(u);
+        const field = this.bestBidField(hand, from.x, from.y);
+        if (field !== null) this.giveFieldTask(u, field);
+      }
+    } else {
+      for (const field of state.fields) {
+        if (field.status !== 'open' || !this.fieldHasTask(field)) continue;
+        const worker = this.getBestWorker(hand, field.x, field.y);
+        if (worker !== null) this.giveFieldTask(worker, field);
+      }
+    }
+  }
+
+  /** v0: only road and corn field plans get a builder task (TKMTaskBuildWine is out, spec §1a). */
+  private fieldHasTask(field: FieldPlan): boolean {
+    return field.fieldType === 'road' || field.fieldType === 'corn';
+  }
+
+  /** TKMFieldworksList.BestBid (:389–407) restricted to the v0 field types. */
+  private bestBidField(hand: number, workerX: number, workerY: number): FieldPlan | null {
+    const state = this.constructionState(hand);
+    let best: FieldPlan | null = null;
+    let bestBid = Number.POSITIVE_INFINITY;
+    for (const f of state.fields) {
+      if (f.status !== 'open' || !this.fieldHasTask(f)) continue;
+      if (!this.canWalkTo(workerX, workerY, f.x, f.y)) continue;
+      const bid = C.diagDistance(workerX, workerY, f.x, f.y);
+      if (bid < bestBid) {
+        bestBid = bid;
+        best = f;
+      }
+    }
+    return best;
+  }
+
+  /** AssignHouses (:1329–1355). */
+  private assignHouses(hand: number, state: ConstructionState): void {
+    if (this.idleBuilderCount(hand) === 0) return;
+    const canBuild = (uid: number): boolean => {
+      const h = this.houseByUid(uid);
+      return h !== null && !h.destroyed && C.checkResToBuild(h);
+    };
+    const jobs = C.siteJobCount(state, canBuild);
+    if (jobs === 0) return;
+    if (jobs > this.idleBuilderCount(hand)) {
+      for (const uid of state.workers.slice()) {
+        if (!this.isIdleBuilder(uid)) continue;
+        const u = this.unitByUid(uid);
+        if (u === null) continue;
+        const from = this.roundPos(u);
+        const site = C.bestBidSite(this, hand, from.x, from.y, (houseUid) => {
+          const h = this.houseByUid(houseUid);
+          if (h === null || h.destroyed) return null;
+          return {
+            typeId: h.typeId,
+            x: h.x,
+            y: h.y,
+            entranceX: h.entrance.x,
+            entranceY: h.entrance.y,
+            checkRes: C.checkResToBuild(h),
+          };
+        });
+        if (site === null) continue;
+        const house = this.houseByUid(site.houseUid);
+        if (house !== null) this.giveHouseTask(u, site, house);
+      }
+    } else {
+      for (const site of state.sites) {
+        if (site.houseUid === 0) continue;
+        const h = this.houseByUid(site.houseUid);
+        if (h === null || h.destroyed || !C.checkResToBuild(h)) continue;
+        if (site.assigned >= C.maxWorkersForHouse(h.typeId)) continue;
+        const worker = this.getBestWorker(hand, h.entrance.x, h.entrance.y + 1);
+        if (worker !== null) this.giveHouseTask(worker, site, h);
+      }
+    }
+  }
+
+  /** The fCellsToDig list (:571–581): BuildArea nonzero cells, left→right, top→bottom. */
+  private houseAreaCells(typeId: number, locX: number, locY: number): Pt[] {
+    const out: Pt[] = [];
+    const area = housePlan(typeId);
+    for (let i = 1; i <= 4; i++) {
+      for (let k = 1; k <= 4; k++) {
+        if (area[i - 1][k - 1] === 0) continue;
+        out.push({ x: locX + k - 3, y: locY + i - 4 });
+      }
+    }
+    return out;
+  }
+
+  /** GetListOfCellsAround (KM_Houses.pas 1076–1106) with the builder's tpWalk passability. */
+  private houseCellsAround(h: EconHouse): { x: number; y: number; dir: number }[] {
+    const out: { x: number; y: number; dir: number }[] = [];
+    const area = housePlan(h.typeId);
+    const add = (x: number, y: number, dir: number): void => {
+      if (this.tileWalkable(x, y)) out.push({ x, y, dir }); // CheckPassability(cell, tpWalk)
+    };
+    for (let i = 1; i <= 4; i++) {
+      for (let k = 1; k <= 4; k++) {
+        if (area[i - 1][k - 1] === 0) continue;
+        if (i === 1 || area[i - 2][k - 1] === 0) add(h.x + k - 3, h.y + i - 4 - 1, 5); // Above → dirS
+        if (i === 4 || area[i][k - 1] === 0) add(h.x + k - 3, h.y + i - 4 + 1, 1); // Below → dirN
+        if (k === 4 || area[i - 1][k] === 0) add(h.x + k - 3 + 1, h.y + i - 4, 7); // FromRight → dirW
+        if (k === 1 || area[i - 1][k - 2] === 0) add(h.x + k - 3 - 1, h.y + i - 4, 3); // FromLeft → dirE
+      }
+    }
+    return out;
+  }
+
+  /** GiveTask (:791–796) → TKMUnitWorker.BuildHouseArea (KM_Units.pas 982–985). */
+  private givePlanTask(u: EconUnit, plan: HousePlan): void {
+    const st = this.unitStateMap.get(u);
+    if (st === undefined) return;
+    C.takePlan(plan, u.uid);
+    const cells = this.houseAreaCells(plan.typeId, plan.x, plan.y);
+    st.task = {
+      kind: 'buildHouseArea',
+      phase: 0,
+      typeId: plan.typeId,
+      locX: plan.x,
+      locY: plan.y,
+      plan,
+      houseUid: 0,
+      houseNeedsWorker: false,
+      houseReadyToBuild: false,
+      cells,
+      lastToDig: cells.length - 1,
+      closed: false,
+    };
+    this.startBuilderTask(u, st);
+    this.emit('build-area-assigned', `unit#${u.uid} plan#${plan.uid} type=${plan.typeId}`);
+  }
+
+  /** GiveTask (:471–476) → TKMUnitWorker.BuildField/BuildRoad (KM_Units.pas 970–979). */
+  private giveFieldTask(u: EconUnit, field: FieldPlan): void {
+    if (field.fieldType !== 'road' && field.fieldType !== 'corn') return; // wine is out of v0
+    const st = this.unitStateMap.get(u);
+    if (st === undefined) return;
+    C.takeField(field, u.uid);
+    if (field.fieldType === 'road') {
+      st.task = {
+        kind: 'buildRoad',
+        phase: 0,
+        x: field.x,
+        y: field.y,
+        field,
+        demandSet: false,
+        tileLockSet: false,
+        isDigged: false,
+        closed: false,
+      };
+      this.emit('build-road-assigned', `unit#${u.uid} (${field.x},${field.y})`);
+    } else {
+      st.task = {
+        kind: 'buildField',
+        phase: 0,
+        phase2: 0,
+        x: field.x,
+        y: field.y,
+        field,
+        tileLockSet: false,
+        closed: false,
+      };
+      this.emit('build-field-assigned', `unit#${u.uid} (${field.x},${field.y})`);
+    }
+    this.startBuilderTask(u, st);
+  }
+
+  /** GiveTask (:316–320) → TKMUnitWorker.BuildHouse (KM_Units.pas 964–967). */
+  private giveHouseTask(u: EconUnit, site: BuildSite, house: EconHouse): void {
+    const st = this.unitStateMap.get(u);
+    if (st === undefined) return;
+    site.assigned += 1;
+    st.task = {
+      kind: 'buildHouse',
+      phase: 0,
+      phase2: 0,
+      houseUid: house.uid,
+      site,
+      buildFrom: null,
+      fromDir: 0,
+      cells: this.houseCellsAround(house),
+      closed: false,
+    };
+    this.startBuilderTask(u, st);
+    this.emit('build-house-assigned', `unit#${u.uid} house#${house.uid}`);
+  }
+
+  private startBuilderTask(u: EconUnit, st: UnitState): void {
+    st.walk = null;
+    st.actionLock = 0;
+    st.locked = false;
+    u.action = 'stay';
+    u.taskKind = st.task !== null ? st.task.kind : 'none';
+  }
+
+  /** Worker.CancelTask for a removed plan (:838–839): the task's destructor runs. */
+  private cancelPlanTask(hand: number, plan: HousePlan): void {
+    void hand;
+    if (plan.workerUid === 0) return;
+    const u = this.unitByUid(plan.workerUid);
+    if (u === null) return;
+    const st = this.unitStateMap.get(u);
+    if (st === undefined || st.task === null) return;
+    if (st.task.kind === 'buildHouseArea' && st.task.plan === plan) {
+      const task = st.task;
+      st.task = null;
+      this.finishTask(u, st, task);
+    }
+  }
+
+  /** Worker.CancelTask for a removed field (:570–571). */
+  private cancelFieldTask(hand: number, field: FieldPlan): void {
+    void hand;
+    if (field.workerUid === 0) return;
+    const u = this.unitByUid(field.workerUid);
+    if (u === null) return;
+    const st = this.unitStateMap.get(u);
+    if (st === undefined || st.task === null) return;
+    const task = st.task;
+    if ((task.kind === 'buildRoad' || task.kind === 'buildField') && task.field === field) {
+      st.task = null;
+      this.finishTask(u, st, task);
+    }
+  }
+
+  // ---- the four builder tasks (KM_UnitTaskBuild.pas) ------------------------------------------
+
+  /** tpWorker route check (KM_Terrain.pas 3840–3844 + KM_Units.pas 2030–2034). */
+  private workerCanWalkTo(from: Pt, to: Pt): boolean {
+    return findPath(this.workerGrid, from, to) !== null;
+  }
+
+  /** SetActionWalkToSpot with the builder's Digging passability (tpWorker). */
+  private walkToWorker(u: EconUnit, st: UnitState, to: Pt): boolean {
+    const from = this.roundPos(u);
+    const w = startWalk(this.workerGrid, from, to);
+    if (w === null) return false;
+    st.walk = w;
+    u.action = 'walk';
+    return true;
+  }
+
+  /** TKMTaskBuildHouseArea (:681–765). */
+  private runBuildHouseArea(u: EconUnit, st: UnitState, task: Task & { kind: 'buildHouseArea' }): 'continues' | 'done' {
+    const state = this.constructionState(u.owner);
+    // WalkShouldAbandon (:647–651): while the plan is still open, the terrain must still take it.
+    if (task.houseUid === 0 && task.plan.status !== 'empty') {
+      const entrance = C.planEntrance(state, task.plan);
+      if (!C.canPlaceHouse(this, task.typeId, entrance.x, entrance.y)) return 'done';
+    }
+    if (task.houseUid !== 0) {
+      const h = this.houseByUid(task.houseUid);
+      if (h !== null && h.destroyed) return 'done'; // (:692–697)
+    }
+    const cell = task.cells[task.lastToDig];
+    switch (task.phase) {
+      case 0: {
+        // SetActionWalkToSpot(GetHouseEntranceLoc) (:701–704).
+        const entrance = { x: task.locX + C.entranceOffsetX(state, task.typeId), y: task.locY };
+        if (!this.walkTo(u, st, entrance)) return 'done';
+        task.phase = 1;
+        return 'continues';
+      }
+      case 1: {
+        // CancelThePlan + AddHouseWIP + stay 2 (:705–716).
+        if (task.plan.status !== 'empty') C.closePlan(task.plan);
+        const house = this.addHouseWIP(task.typeId, task.locX, task.locY, u.owner);
+        task.houseUid = house.uid;
+        task.houseNeedsWorker = true;
+        this.setLockedStay(u, st, 2, false);
+        task.phase = 2;
+        return 'continues';
+      }
+      case 2: {
+        // Walk to the next cell to dig, reversed (:717–725).
+        if (cell === undefined) return 'done';
+        const from = this.roundPos(u);
+        if (!this.workerCanWalkTo(from, cell)) return 'done';
+        if (!this.walkToWorker(u, st, cell)) return 'done';
+        task.phase = 3;
+        return 'continues';
+      }
+      case 3:
+        this.setLockedStay(u, st, 11, true); // (726–729)
+        task.phase = 4;
+        return 'continues';
+      case 4:
+        this.setLockedStay(u, st, 11, true); // (729–732)
+        if (cell !== undefined) this.flattenTerrain(cell.x, cell.y);
+        task.phase = 5;
+        return 'continues';
+      case 5:
+        this.setLockedStay(u, st, 11, true); // (733–736)
+        if (cell !== undefined) this.flattenTerrain(cell.x, cell.y);
+        task.phase = 6;
+        return 'continues';
+      case 6: {
+        // (737–746): flatten twice, lock tlDigged, entrance road, remove object, next cell.
+        this.setLockedStay(u, st, 11, true);
+        if (cell !== undefined) {
+          this.flattenTerrain(cell.x, cell.y);
+          this.flattenTerrain(cell.x, cell.y);
+          if (this.inMapCoords(cell.x, cell.y)) {
+            this.tileLock[this.index(cell.x, cell.y)] = TL_DIGGED;
+            this.recomputeWalkAround(cell.x, cell.y);
+          }
+          const house = task.houseUid !== 0 ? this.houseByUid(task.houseUid) : null;
+          if (house !== null && house.entrance.x === cell.x && house.entrance.y === cell.y) {
+            this.setRoad(cell.x, cell.y, u.owner);
+          }
+          this.removeObject(cell.x, cell.y);
+        }
+        task.lastToDig -= 1;
+        task.phase = 7;
+        if (task.lastToDig >= 0) task.phase = 2; // repeat with the next cell (:763–764)
+        return 'continues';
+      }
+      case 7: {
+        // Walk away from the site before it becomes stoned (:747–756).
+        const house = task.houseUid !== 0 ? this.houseByUid(task.houseUid) : null;
+        const out = this.getOutOfTheWay(u, house);
+        if (!this.walkToWorker(u, st, out) && !this.walkTo(u, st, out)) st.actionLock = 1;
+        task.houseNeedsWorker = false;
+        task.houseReadyToBuild = true;
+        task.phase = 8;
+        return 'continues';
+      }
+      default:
+        return 'done';
+    }
+  }
+
+  /**
+   * GetOutOfTheWay (KM_Terrain.pas 3963–4048) essentials: the weighted-random free neighbour
+   * (40·isFree + isPushable + 2·KaMRandom(2)), falling back to PointBelowEntrance (:751–752).
+   */
+  private getOutOfTheWay(u: EconUnit, house: EconHouse | null): Pt {
+    const loc = this.roundPos(u);
+    let result = loc;
+    let bestWeight = -1e30;
+    for (let i = -1; i <= 1; i++) {
+      for (let k = -1; k <= 1; k++) {
+        if (i === 0 && k === 0) continue;
+        const tx = loc.x + k;
+        const ty = loc.y + i;
+        if (!this.inMapCoords(tx, ty)) continue;
+        if (!canWalkDiagonal(this.grid, loc, tx, ty)) continue;
+        const at = this.index(tx, ty);
+        const lock = this.tileLock[at];
+        if (lock !== TL_NONE && lock !== TL_FENCED) continue; // (3999)
+        if (this.grid.walk[at] !== 1) continue; // aPass = tpWalk (4000)
+        const other = this.unitAtTile(tx, ty);
+        const otherSt = other !== null ? this.unitStateMap.get(other) : undefined;
+        const isFree = other === null || other === u;
+        const isPushable =
+          other !== null && other !== u && otherSt !== undefined && other.action === 'stay' && !otherSt.locked;
+        const weight = 40 * (isFree ? 1 : 0) + (isPushable ? 1 : 0) + 2 * this.drawN(2); // (4030–4034)
+        if (weight > bestWeight) {
+          bestWeight = weight;
+          result = { x: tx, y: ty };
+        }
+      }
+    }
+    if (samePoint(result, loc)) {
+      return house !== null ? pointBelowEntrance(house) : loc; // (751–752)
+    }
+    return result;
+  }
+
+  /** TKMTaskBuildHouse (:845–901). */
+  private runBuildHouse(u: EconUnit, st: UnitState, task: Task & { kind: 'buildHouse' }): 'continues' | 'done' {
+    const house = this.houseByUid(task.houseUid);
+    // WalkShouldAbandon (:831–834).
+    if (house === null || house.destroyed || !C.checkResToBuild(house) || C.isComplete(house)) return 'done';
+    switch (task.phase) {
+      case 0: {
+        if (!this.pickRandomSpot(u, task, house)) return 'done'; // (:858–864)
+        if (task.buildFrom === null) return 'done';
+        if (!this.walkTo(u, st, task.buildFrom)) return 'done';
+        task.phase = 1;
+        return 'continues';
+      }
+      case 1:
+        u.dir = task.fromDir; // (866–870)
+        this.setLockedStay(u, st, 0, false);
+        task.phase = 2;
+        return 'continues';
+      case 2: {
+        this.setLockedStay(u, st, 5, true); // (871–879)
+        u.dir = task.fromDir;
+        if (C.isStone(house) && this.tileLock[this.index(house.x, house.y)] !== TL_HOUSE) this.setHouseBuilt(house);
+        task.phase = 3;
+        return 'continues';
+      }
+      case 3: {
+        this.incBuildingProgress(house); // (880–885)
+        this.setLockedStay(u, st, 6, true);
+        u.animStep = 5; // SetActionLockedStay(6, uaWork, False, 0, 5)
+        task.phase2 += 1;
+        task.phase = 4;
+        if (!C.isComplete(house)) task.phase = task.phase2 % 5 === 0 ? 0 : 2; // (896–900)
+        return 'continues';
+      }
+      case 4:
+        this.setUnlockedStay(u, st, 1); // (886–889)
+        task.phase = 5;
+        return 'continues';
+      default:
+        return 'done';
+    }
+  }
+
+  /** PickRandomSpot (KM_Units.pas 997–1017): one KaMRandom draw over the reachable cells. */
+  private pickRandomSpot(u: EconUnit, task: Task & { kind: 'buildHouse' }, house: EconHouse): boolean {
+    void house;
+    const from = this.roundPos(u);
+    const spots: { x: number; y: number; dir: number }[] = [];
+    for (const c of task.cells) {
+      if (samePoint(c, from)) continue;
+      if (!this.canWalkTo(from.x, from.y, c.x, c.y)) continue;
+      spots.push(c);
+    }
+    if (spots.length === 0) return false;
+    const pick = spots[this.drawN(spots.length)];
+    task.buildFrom = { x: pick.x, y: pick.y };
+    task.fromDir = pick.dir;
+    return true;
+  }
+
+  /** TKMTaskBuildRoad (:218–291). */
+  private runBuildRoad(u: EconUnit, st: UnitState, task: Task & { kind: 'buildRoad' }): 'continues' | 'done' {
+    const at = this.index(task.x, task.y);
+    // WalkShouldAbandon (:204–208): the plan is still open and the tile can no longer take a road.
+    if (task.field !== null && task.field.status !== 'empty' && !this.tileMakeRoads(task.x, task.y)) return 'done';
+    switch (task.phase) {
+      case 0: {
+        if (!this.walkTo(u, st, { x: task.x, y: task.y })) return 'done'; // (230–233)
+        task.phase = 1;
+        return 'continues';
+      }
+      case 1: {
+        this.tileLock[at] = TL_ROAD_WORK; // (234–244)
+        this.recomputeWalkAround(task.x, task.y);
+        task.tileLockSet = true;
+        this.cancelRoadPlan(u, task); // CancelThePlan
+        this.addUnitDemand(u.owner, u, WT_STONE, 1); // AddDemand(nil, fUnit, wtStone, 1, dtOnce, diHigh4)
+        task.demandSet = true;
+        this.setLockedStay(u, st, 11, true);
+        task.phase = 2;
+        return 'continues';
+      }
+      case 2: {
+        this.incDigState(task.x, task.y); // (246–250)
+        this.setLockedStay(u, st, 11, true);
+        task.phase = 3;
+        return 'continues';
+      }
+      case 3: {
+        this.incDigState(task.x, task.y); // (251–254)
+        this.setLockedStay(u, st, 11, true);
+        task.phase = 4;
+        return 'continues';
+      }
+      case 4: {
+        // (255–264): the stone wait — stay 30, repeat until the serf delivers.
+        this.setLockedStay(u, st, 30, false);
+        if (!task.isDigged) {
+          task.isDigged = true;
+          this.emit('road-digged', `(${task.x},${task.y})`);
+        }
+        return 'continues'; // the phase is not advanced: the serf's delivery moves it to 5
+      }
+      case 5: {
+        this.setLockedStay(u, st, 11, true); // (265–269)
+        task.demandSet = false;
+        task.phase = 6;
+        return 'continues';
+      }
+      case 6: {
+        this.incDigState(task.x, task.y); // (270–273)
+        this.setLockedStay(u, st, 11, true);
+        task.phase = 7;
+        return 'continues';
+      }
+      case 7: {
+        this.incDigState(task.x, task.y); // (274–280)
+        this.flattenTerrain(task.x, task.y);
+        if (this.grid.elems[this.grid.obj[at]].wineOrCorn) this.removeObject(task.x, task.y);
+        this.setLockedStay(u, st, 11, true);
+        task.phase = 8;
+        return 'continues';
+      }
+      case 8: {
+        // (281–287): SetRoad + RemoveObjectsKilledByRoad + stay 5 + unlock.
+        this.setRoad(task.x, task.y, u.owner);
+        this.removeObjectsKilledByRoad(task.x, task.y);
+        this.setUnlockedStay(u, st, 5);
+        this.tileLock[at] = TL_NONE;
+        this.recomputeWalkAround(task.x, task.y);
+        task.tileLockSet = false;
+        task.phase = 9;
+        return 'continues';
+      }
+      default:
+        return 'done';
+    }
+  }
+
+  /** TKMTaskBuildField (:503–543). */
+  private runBuildField(u: EconUnit, st: UnitState, task: Task & { kind: 'buildField' }): 'continues' | 'done' {
+    const at = this.index(task.x, task.y);
+    if (task.field !== null && task.field.status !== 'empty' && !this.tileGoodForField(task.x, task.y)) return 'done';
+    switch (task.phase) {
+      case 0: {
+        if (!this.walkTo(u, st, { x: task.x, y: task.y })) return 'done'; // (515–518)
+        task.phase = 1;
+        return 'continues';
+      }
+      case 1: {
+        this.tileLock[at] = TL_FIELD_WORK; // (519–524)
+        this.recomputeWalkAround(task.x, task.y);
+        task.tileLockSet = true;
+        this.cancelFieldPlan(u, task);
+        this.setLockedStay(u, st, 0, false); // SetActionLockedStay(0, uaWalk)
+        task.phase = 2;
+        return 'continues';
+      }
+      case 2: {
+        this.setLockedStay(u, st, 11, true); // (525–532)
+        task.phase2 += 1;
+        if (task.phase2 === 2) this.resetDigState(task.x, task.y);
+        if (task.phase2 === 6 && this.grid.elems[this.grid.obj[at]].wineOrCorn) this.removeObject(task.x, task.y);
+        if (task.phase2 === 6 || task.phase2 === 8) this.incDigState(task.x, task.y);
+        if (task.phase2 === 10) task.phase = 3; // (:542: only phases 0 and 10 advance fPhase)
+        return 'continues';
+      }
+      case 3: {
+        this.setFieldCorn(task.x, task.y, u.owner); // (533–539)
+        this.setUnlockedStay(u, st, 5);
+        this.tileLock[at] = TL_NONE;
+        this.recomputeWalkAround(task.x, task.y);
+        task.tileLockSet = false;
+        task.phase = 4;
+        return 'continues';
+      }
+      default:
+        return 'done';
+    }
+  }
+
+  /** CancelThePlan of the road task (:211–215): the plan is closed now. */
+  private cancelRoadPlan(u: EconUnit, task: Task & { kind: 'buildRoad' }): void {
+    if (task.field === null) return;
+    C.closeField(task.field);
+  }
+
+  /** CancelThePlan of the field task (:496–500). */
+  private cancelFieldPlan(u: EconUnit, task: Task & { kind: 'buildField' }): void {
+    if (task.field === null) return;
+    C.closeField(task.field);
+  }
+
+  /** IncDigState (KM_Terrain.pas 2433–2442): the toDig1..toDig4 overlay steps. */
+  private incDigState(x: number, y: number): void {
+    if (!this.inMapCoords(x, y)) return;
+    const at = this.index(x, y);
+    const stage = this.digOverlay[at];
+    this.digOverlay[at] = stage >= 3 ? 4 : stage + 1;
+  }
+
+  /** ResetDigState (KM_Terrain.pas 2445–2448). */
+  private resetDigState(x: number, y: number): void {
+    if (!this.inMapCoords(x, y)) return;
+    this.digOverlay[this.index(x, y)] = 0;
+  }
+
+  /** RemoveObjectsKilledByRoad (KM_Terrain.pas 3309–3339). */
+  private removeObjectsKilledByRoad(x: number, y: number): void {
+    const killByRoadCorner = (px: number, py: number): void => {
+      if (!this.inMapCoords(px, py)) return;
+      const obj = this.grid.obj[this.index(px, py)];
+      if (this.grid.elems[obj].killByRoad !== 'nwCorner') return;
+      if (
+        this.isRoadTile(px - 1, py) &&
+        this.isRoadTile(px - 1, py - 1) &&
+        this.isRoadTile(px, py - 1) &&
+        this.isRoadTile(px, py)
+      ) {
+        this.removeObject(px, py);
+      }
+    };
+    killByRoadCorner(x, y);
+    killByRoadCorner(x + 1, y);
+    killByRoadCorner(x, y + 1);
+    killByRoadCorner(x + 1, y + 1);
+    const removeIfWest = (px: number, py: number): void => {
+      if (!this.inMapCoords(px, py)) return;
+      if (this.grid.elems[this.grid.obj[this.index(px, py)]].killByRoad === 'west') this.removeObject(px, py);
+    };
+    if (this.isRoadTile(x - 1, y)) removeIfWest(x, y);
+    if (this.isRoadTile(x + 1, y)) removeIfWest(x + 1, y);
+  }
+
+  /** AddDemand(nil, aUnit, wtStone, 1, dtOnce, diHigh4) — the road task's stone demand. */
+  private addUnitDemand(owner: number, unit: EconUnit, ware: number, count: number): void {
+    this.demands[owner].push({
+      houseUid: 0,
+      unitUid: unit.uid,
+      ware,
+      slot: -1,
+      script: true,
+      count,
+      being: 0,
+      construction: false,
+    });
+  }
+
+  /** RemDemand(fUnit) — the road task's destructor drops its unit demand (:175–176). */
+  private removeUnitDemands(unitUid: number): void {
+    for (const list of this.demands) {
+      for (let i = list.length - 1; i >= 0; i--) {
+        if (list[i].unitUid === unitUid) list.splice(i, 1);
+      }
+    }
+  }
+
+  // ---- builder-task destructors (the Pascal's Destroy methods) --------------------------------
+
+  /** The M5a task destructors: TKMTaskBuildHouseArea.Destroy (:608–644) and friends. */
+  private finishTask(u: EconUnit, st: UnitState, task: Task): void {
+    switch (task.kind) {
+      case 'buildHouseArea':
+        this.finishHouseAreaTask(u, task);
+        break;
+      case 'buildHouse':
+        if (!task.closed) {
+          task.closed = true;
+          C.remSiteWorker(task.site); // HouseList.RemWorker (:819)
+        }
+        break;
+      case 'buildRoad':
+        if (!task.closed) {
+          task.closed = true;
+          this.finishRoadTask(u, task);
+        }
+        break;
+      case 'buildField':
+        if (!task.closed) {
+          task.closed = true;
+          this.finishFieldTask(u, task);
+        }
+        break;
+      default:
+        break;
+    }
+    void st;
+  }
+
+  /** TKMTaskBuildHouseArea.Destroy (:608–644). */
+  private finishHouseAreaTask(u: EconUnit, task: Task & { kind: 'buildHouseArea' }): void {
+    if (task.closed) return;
+    task.closed = true;
+    const state = this.constructionState(u.owner);
+    // "Yet unstarted": the plan is still the worker's → reopen or close it (:615–624).
+    if (task.houseUid === 0 && task.plan.status !== 'empty' && task.plan.workerUid === u.uid) {
+      const entrance = C.planEntrance(state, task.plan);
+      if (C.canPlaceHouse(this, task.typeId, entrance.x, entrance.y)) C.reopenPlan(task.plan);
+      else C.closePlan(task.plan);
+    }
+    const house = task.houseUid !== 0 ? this.houseByUid(task.houseUid) : null;
+    // The worker was killed: the WIP house is demolished (:626–630).
+    if (task.houseNeedsWorker && house !== null && !house.destroyed) this.demolishHouse(house, -1);
+    // The site joins the ready list with hbsWood + both demands (:632–640).
+    if (task.houseReadyToBuild && !task.houseNeedsWorker && house !== null && !house.destroyed) {
+      this.completeHouseArea(house);
+    }
+  }
+
+  /** The TKMTaskBuildHouseArea success path (:633–640). */
+  private completeHouseArea(house: EconHouse): void {
+    house.buildState = 'wood';
+    C.addSite(this.constructionState(house.owner), house.uid);
+    this.addConstructionDemand(house, WT_TIMBER, house.woodCost);
+    this.addConstructionDemand(house, WT_STONE, house.stoneCost);
+    this.emit('house-plan-digged', `house#${house.uid} type=${house.typeId}`);
+  }
+
+  /** TKMTaskBuildRoad.Destroy (:173–201). */
+  private finishRoadTask(u: EconUnit, task: Task & { kind: 'buildRoad' }): void {
+    if (task.demandSet) this.removeUnitDemands(u.uid);
+    if (task.tileLockSet) {
+      this.tileLock[this.index(task.x, task.y)] = TL_NONE;
+      this.recomputeWalkAround(task.x, task.y);
+    }
+    if (task.field === null || task.field.status === 'empty') return;
+    // Allow other workers to take the task, or close an invalid plan (:182–197).
+    if (this.tileMakeRoads(task.x, task.y)) C.reopenField(task.field);
+    else C.closeField(task.field);
+  }
+
+  /** TKMTaskBuildField.Destroy (:473–486). */
+  private finishFieldTask(u: EconUnit, task: Task & { kind: 'buildField' }): void {
+    if (task.tileLockSet) {
+      this.tileLock[this.index(task.x, task.y)] = TL_NONE;
+      this.recomputeWalkAround(task.x, task.y);
+    }
+    if (task.field === null || task.field.status === 'empty') return;
+    if (this.tileGoodForField(task.x, task.y)) C.reopenField(task.field);
+    else C.closeField(task.field);
+  }
+
 
   // =============================================================================================
   // M4 combat host (docs/M4-SPIKE.md §3): the world side of packages/sim/combat.ts
@@ -2325,15 +3886,22 @@ export class EconomyWorld {
     return result;
   }
 
-  /** GetHealth (KM_Houses.pas 1173–1176): max(buildingProgress − damage, 0). */
+  /** GetHealth (KM_Houses.pas 1173–1176): max(buildingProgress − damage, 0). A complete house's
+   *  progress is its MaxHealth (565); a WIP house's health is its building progress. */
   houseHealth(h: EconHouse): number {
-    return Math.max((h.maxHealth ?? 0) - (h.damage ?? 0), 0);
+    const base = h.buildState === 'done' ? h.maxHealth ?? 0 : h.buildingProgress;
+    return Math.max(base - (h.damage ?? 0), 0);
+  }
+
+  /** MaxHealth (KM_Houses.pas 1274–1280): 0 for hbsNoGlyph houses, else the spec value. */
+  houseMaxHealth(h: EconHouse): number {
+    return h.buildState === 'noGlyph' ? 0 : h.maxHealth ?? 0;
   }
 
   /** AddDamage (KM_Houses.pas 1296–1330): clamp, fire sub-actions, AI notify stub, demolish at 0. */
   houseAddDamage(h: EconHouse, amount: number, attackerUid: number): void {
     if (h.destroyed === true) return;
-    const maxHealth = h.maxHealth ?? 0;
+    const maxHealth = this.houseMaxHealth(h);
     const before = h.damage ?? 0;
     h.damage = Math.min(before + amount, maxHealth);
     this.houseDamageTotal += h.damage - before;
@@ -2363,6 +3931,7 @@ export class EconomyWorld {
         if (!this.inMapCoords(tx, ty)) continue;
         const at = this.index(tx, ty);
         this.houseTile[at] = 0;
+        this.tileLock[at] = TL_NONE; // hsNone → TileLock := tlNone (KM_Terrain.pas 4640)
         this.recomputeWalkTile(tx, ty);
       }
     }
@@ -2438,19 +4007,35 @@ export class EconomyWorld {
     return origin;
   }
 
-  /** Recompute one tile's tpWalk after an object/house change (UpdatePassability essentials). */
+  /** Recompute one tile's tpWalk/tpWorker/tpWalkRoad after an object/lock/house change
+   *  (UpdatePassability essentials, KM_Terrain.pas 3752–3844). */
   private recomputeWalkTile(x: number, y: number): void {
     if (!this.inMapCoords(x, y)) return;
     const at = this.index(x, y);
     const rec = (y - 1) * this.map.mapX + (x - 1);
     const terrain = this.map.tiles[rec * 4];
     const flags = this.grid.tiles[terrain];
-    const walkable =
+    const base =
       flags !== undefined &&
       flags.walkable &&
       !this.grid.elems[this.grid.obj[at]].allBlocked &&
       checkHeightPass(this.grid, x, y);
-    this.grid.walk[at] = walkable ? 1 : 0;
+    const lock = this.tileLock[at];
+    // tpWalk: the lock must be none/fenced/fieldWork/roadWork (3773–3778).
+    const tpWalk = base && (lock === TL_NONE || lock === TL_FENCED || lock === TL_FIELD_WORK || lock === TL_ROAD_WORK);
+    this.grid.walk[at] = tpWalk ? 1 : 0;
+    // tpWorker: everything except tlHouse (3840–3844).
+    this.workerGrid.walk[at] = base && lock !== TL_HOUSE ? 1 : 0;
+    // tpWalkRoad (3780–3782).
+    this.roadGrid.walk[at] = tpWalk && this.roadOverlay[at] === 1 ? 1 : 0;
+  }
+
+  /** UpdatePassability for a rect of tiles (the 3×3 around a changed tile, KM_Terrain.pas 4464). */
+  private recomputeWalkAround(x: number, y: number, radius = 1): void {
+    for (let i = y - radius; i <= y + radius; i++) {
+      for (let k = x - radius; k <= x + radius; k++) this.recomputeWalkTile(k, i);
+    }
+    this.walkConnectDirty = true;
   }
 
   // ---- FOW / vertices ------------------------------------------------------------------------
@@ -2520,6 +4105,13 @@ export class EconomyWorld {
     for (let i = this.units.length - 1; i >= 0; i--) {
       const u = this.units[i];
       if (!u.dead) continue;
+      const st = this.unitStates[i];
+      // A dying builder's task runs its destructor (the Pascal frees the task with the unit).
+      if (st !== undefined && st.task !== null) {
+        const task = st.task;
+        st.task = null;
+        this.finishTask(u, st, task);
+      }
       this.unitStateMap.delete(u);
       this.units.splice(i, 1);
       this.unitStates.splice(i, 1);
@@ -2651,6 +4243,14 @@ export class EconomyWorld {
       damage: 0,
       destroyed: false,
       fireLevel: 0,
+      buildState: 'done',
+      buildingProgress: spec !== undefined ? spec.maxHealth : 0,
+      buildSupplyWood: 0,
+      buildSupplyStone: 0,
+      buildReserve: 0,
+      readyToBeBuilt: false,
+      woodCost: spec !== undefined ? spec.woodCost : 0,
+      stoneCost: spec !== undefined ? spec.stoneCost : 0,
     };
     this.houses.push(house);
     const isStore = typeId === 11;
@@ -2672,6 +4272,8 @@ export class EconomyWorld {
         if (!this.inMapCoords(tx, ty)) continue;
         const at = this.index(tx, ty);
         this.grid.walk[at] = 0;
+        this.workerGrid.walk[at] = 0;
+        this.tileLock[at] = TL_HOUSE;
         this.houseTile[at] = house.uid;
       }
     }
