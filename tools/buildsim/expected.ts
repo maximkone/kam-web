@@ -34,7 +34,7 @@ export const EXPECTED = {
   events: {
     'build-area-assigned': 1,
     'build-field-assigned': 1,
-    'build-house-assigned': 8,
+    'build-house-assigned': 9,
     'build-road-assigned': 1,
     'build-supply': 5,
     'chop-plan': 1,
@@ -67,7 +67,7 @@ export const EXPECTED = {
     housePlanDigged: 1,
     houseActivated: 1,
     buildSupply: 5, // 3 timber + 2 stone deliveries into the build supply
-    buildHouseAssigned: 8, // 3 builders over several assignment rounds (dtOnce deliveries)
+    buildHouseAssigned: 9, // 3 builders over several assignment rounds (dtOnce deliveries)
     roadDigged: 1,
     roadBuilt: 2, // the road plan tile + the house entrance cell (KM_UnitTaskBuild.pas 742–743)
     fieldBuilt: 1,
@@ -81,7 +81,7 @@ export const EXPECTED = {
     sawmillUnlocked: true, // the hut released htSawmill (KM_HandLocks.pas 69–83)
     storeUnlocked: true,
     barracksUnlocked: false, // the barracks need a sawmill
-    rngState: 514943164,
+    rngState: 959552087,
   },
-  sha256: '6d9d96eda5a61fbb8d61e863459922d90d28313cd9f63f0c9fda2d2d78c3d87c',
+  sha256: '5d17abc171f103021acc5ee25fba70ee3d1380e95b38d6b1016b3b5b40ed118d',
 };

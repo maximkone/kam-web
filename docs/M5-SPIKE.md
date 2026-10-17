@@ -533,3 +533,80 @@ woodcutter and carpenter workers at the store; scratch probe, not in the repo):*
 
 **Not done:** the store always-on demand is not reverted (no flag added; the stall had another cause). The realistic probe
 is in scratch only (`C:\Users\me\AppData\Local\Temp\opencode\q4\battle-sun-saw.ts`), not a repo tool.
+
+### 7.9 Worker H3 - the AI food build-out regression: the bid's random and construction terms (Pascal), not the priority table
+
+**Result: fixed.** The corn fields and the inn come back in the aisim economy window (`corn` 0 -> 28, inn placed at
+tick 9169). The cause was not the priority table: the table matches Pascal. The bid **cost** lacked three Pascal terms, so
+road-builder stone (a unit demand) always beat construction stone (a house demand) in the cheapest-road tie-break.
+
+**Priority table, line by line (all match Pascal except one unused value):**
+| demand | Pascal (file:line) | TS (`economy.ts`) |
+|---|---|---|
+| house construction wood/stone | diHigh4, `KM_UnitTaskBuild.pas 637–638` | `addConstructionDemand` `DI_HIGH4` (match) |
+| road-builder stone | diHigh4, `KM_UnitTaskBuild.pas 241` | `addUnitDemand` `DI_HIGH4` (match) |
+| wine planting timber | diHigh4, `KM_UnitTaskBuild.pas 388` (`TKMTaskBuildWine`) | none: wine fields are out of v0 by spec (`economy.ts` line 65) |
+| corn field planting | no demand, `KM_UnitTaskBuild.pas 503–543` | no demand (match) |
+| inn food | diHigh3, `KM_HandLogistics.pas 1169–1171` | `houseDemandImportance` `DI_HIGH3` (match) |
+| school gold | diHigh1, `KM_HandLogistics.pas 1164–1166` | `DI_HIGH1` (match) |
+| store, barracks, ordinary house inputs | diNorm, `KM_Houses.pas 659–660, 2263` | `DI_NORM` (match) |
+| warrior food | diHigh2, `KM_UnitWarrior.pas 294` | not modelled (no warrior food demand in economy.ts; combat sim) |
+
+`DI_HIGH2` is not in the TS table because no TS demand uses it; the enum order (diNorm 0, diHigh4 1, diHigh3 2, diHigh2 3,
+diHigh1 4, `KM_HandLogistics.pas 30–35`) is what the bid compares, and it is the same as the TS constants.
+
+**The bid's Addition terms (what was missing), `packages/sim/economy.ts` `logistics()`:**
+1. House demand: `KaMRandom(16 - 3*distr)` (`KM_HandLogistics.pas 1554`); `distr` from `wareDistribution` (`KM_WareDistribution.pas 12–17, 71–88`; 5 for every pair without a setting). Drawn even when the result is 0 (Pascal `KaMRandom(1)` consumes a draw).
+2. Construction site (not built): `−4 × buildResDeliveredPercent` (`KM_HandLogistics.pas 1576`), and `+0.1` for stone (`1578–1579`). Port: `construction.ts` `buildResDeliveredPercent` (`KM_Houses.pas 1225–1228`).
+3. Finished house and unit demand: `KaMRandom(10)` (`KM_HandLogistics.pas 1585`). Unit demand (road builder) also gets it after its walk route (`1559–1565`).
+4. Fewer supply: `+20 × CheckWareIn` for a house demand, except store, barracks (warfare) and town hall (`1614–1618`); `wareInCount` is the port of `CheckWareIn` (`KM_Houses.pas 1523`).
+5. Barracks: `+10000` for a weapon taken from a store while the barracks holds more than 50 (`1633–1637`).
+6. The serf check comes before the cost (`AnySerfCanDoDelivery`, `KM_HandLogistics.pas 565`), so a pair with no serf draws nothing.
+The existing rules stay: House>Store `+1000` (`1587–1590`), store-offer penalty (`1587–1590`), importance-first bid (`551–577`).
+
+**Why this fixes the food chain:** before, a road builder's stone (walk route, no random) beat a construction site's stone
+whenever its walk was shorter, so the farm and the inn sites starved of stone. Pascal gives the construction site a
+discount (`−4 × share`, up to −4) and gives the builder a random `0–9`; the house site wins more often. The TS now has both.
+
+**Before / after (aisim economy window, 30000 ticks, Battle Sun hand 1; "before" = HEAD `economy.ts`, aisim sha `fae374de`; "after" = sha `8d7bf8e7`; counts from `node tools/aisim/cli.ts --json`):**
+| metric | before | after | note |
+|---|---|---|---|
+| corn fields (`cornFields`, `field-built`) | 0 | 28 | first at t=3128 |
+| farm (HT 8) planned / placed | 0 / 0 | 1 / 0 | planned, never placed in the window; its fields come from the reserved field area (`PlanFarmFields`, `KM_CityPlanner.pas 1099`, `PlanFields` 1226) |
+| inn (HT 27) planned / placed | 0 / 0 | 1 / 1 | `house-wip` t=9169, site dug t=9849, not finished (no `house-activated type=27`) |
+| woodcutter (HT 9) planned / built | 2 / 2 | 0 / 0 | **worse**: one completed woodcutter `house#93` (activated t=7423) was destroyed at t=18900 (`house-destroyed`, `home-lost` 1); the second was not re-planned. Cause of the destruction not traced |
+| quarry (HT 14) planned / built | 5 / 4 | 5 / 5 | |
+| completed houses | 7 | 5 | **worse** (the woodcutter above) |
+| stone produced (`stone-out` events) | 24 | 19 | **worse**: road builders and construction now share stone; the quarry output itself is unchanged |
+| trained recruits (`school-unit-trained`) | 47 | 44 | **worse**, small |
+| road tiles | 234 | 221 | |
+
+Attack phase (12000 ticks, `node tools/aisim/cli.ts --check`): passes, sha `6ab42294...` (was `72bf668e...`). Organic (60000 ticks): passes, sha `62a4cbd2...` (was `f36f6bb4...`). The organic chain still stops before the barracks: `weapons/armour in stock`, `soldiers equipped` and `army groups formed` are all `reached=no` (the 7.7 frontier, unchanged). The per-link timings of the earlier draft notes were not re-measured here and are not claimed.
+
+**Movements of the other gates (each re-frozen; the cause is the new random draws in the bid):**
+- `econsim` `bde47e76...` -> `fd51da4a...`: deliveries 160 -> 157, `timberDelivered` 53 -> 52, `rngState` changed.
+- `buildsim` `6d9d96ed...` -> `5d17abc1...`: `build-house-assigned` 8 -> 9; the hut still completes (`house-activated`, `hutState done`).
+- `prodsim` `f20ca3ae...` -> `ed2e07fe...`: the thresholds still hold (stone in store 27 >= 20, weapons 12 >= 10, soldiers 5 >= 5, two runs identical).
+- `skirmish` `925cc807...` -> `3bdddedb...`: deliveries 67 -> 65, `ware-delivered` 60 -> 58, `build-house-assigned` 28 -> 35, units at the end 33 -> 34, kills 6 unchanged, `killed` 5 -> 4. Re-frozen; the changes are the bid's random order, not a rule. Checked: with HEAD's `packages/sim/skirmish.ts` (H2b's uncommitted edit left out) the sha is the same `3bdddedb...`, so the move is this change's, not H2b's. This worker did not edit `skirmish.ts`.
+- `aistart` `ab6557cf...` -> `b97ee3bf...`: first AI kill 3089 -> 3087, events 374 -> 391; the outcome is unchanged (human defeated, AI won, equipped 12, 4 kills).
+- `aisim` economy `fae374de...` -> `8d7bf8e7...` (1464 events, houses completed 7 -> 5, see the table above), attack `72bf668e...` -> `6ab42294...`, organic `f36f6bb4...` -> `62a4cbd2...`.
+- `combatsim` `09a19821...`: unchanged (the combat code is not touched).
+
+**Not ported (remaining deviations, not hacked around):**
+- The Pascal ranks bids by the fast cost (`KMLengthDiag`, `KM_HandLogistics.pas 2809–2812`), keeps the best `BIDS_TO_COMPARE` = 5 candidates (`385`, `1983`), then re-costs them by the path (`TryEvaluateAccurate`, path × 0.9). The TS takes the global minimum by BFS road steps. The result differs only when two candidates are close.
+- The random draws follow Pascal's rule per pair, but the pair order (TS: offers outer; Pascal: demands outer, `556–575`) differs, so the RNG stream is not Pascal's bit for bit. The distribution is Pascal's; the sha is new.
+- The weapons branch (`1513–1529`: `KaMRandom(16 - 3*distr)` with a fixed `5 + (5 - distr)*4` value for smithies with orders) is not ported (only affects weapon smithies).
+- Warrior food (`diHigh2`, `KM_UnitWarrior.pas 294`) and wine planting (`diHigh4` timber, `KM_UnitTaskBuild.pas 388`): not modelled (see the table).
+- The farm is still not placed in the economy window (its fields are built from the planned field area). If the Pascal planner places the farm before its fields in the same window, the timing differs; not checked line by line here.
+
+**Commands and one-line results (final state, after the expected re-freeze):**
+- `node --test packages/sim/economy.test.ts` -> `ℹ tests 8` / `ℹ pass 8` / `ℹ fail 0`.
+- `node tools/econsim/cli.ts --check` -> `ECON CHECK PASS (6000 ticks, 373 events, 10471 ms)`, sha `fd51da4a...`.
+- `node tools/buildsim/cli.ts --check` -> `BUILD CHECK PASS (2000 ticks, 296 events, 6174 ms)`, sha `5d17abc1...`.
+- `node tools/prodsim/cli.ts --check` -> `PROD CHECK PASS (6000 ticks, stone in store 27 >= 20, weapons 12 >= 10, soldiers 5 >= 5, two runs identical)`, sha `ed2e07fe...`.
+- `node tools/aisim/cli.ts --check` -> `AI CHECK PASS (economy 30000 ticks, 1464 events; attack 12000 ticks; organic 60000 ticks)`.
+- `node tools/skirmish/cli.ts --check` -> `SKIRMISH CHECK PASS (3000 ticks, 374 events, 8 commands, 3916 ms)`, sha `3bdddedb...`.
+- `node tools/aistart/cli.ts --check` -> `AISTART CHECK PASS (3240 ticks, 391 events, human defeated, ai won, equipped 12, attack 2711, killsByAi 4, sha b97ee3bf, two runs identical)`.
+- `node tools/combatsim/cli.ts --check` -> `COMBAT CHECK PASS (900 ticks, 69 events, 277 ms)`, sha `09a19821...` (unchanged).
+- `node --test packages/sim/*.test.ts` -> `ℹ tests 131` / `ℹ pass 131` / `ℹ fail 0` (final tree; the count includes H2b's new `startplace.test.ts`).
+- `npx tsc --noEmit` -> no output (clean, the whole tree, this run).

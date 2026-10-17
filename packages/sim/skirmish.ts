@@ -366,6 +366,46 @@ function keepOpenContent(mission: Mission, open: Set<number>): Mission {
 }
 
 /**
+ * The start store of a hand when the map has no gold, iron or stone within reach of its CENTER_SCREEN.
+ * placeFirstStorehouse (KM_AI.pas 595-698) then returns 0: the Remake's AI places no store there
+ * (KM_AI.pas 694 Exit). A human picks the spot itself with the cursor (KM_Hand.pas ChooseFirstStorehouse
+ * 2165-2168: the house plan, then the road below the entrance), so this takes the spot nearest the seed
+ * that the cursor's tests accept (world.canAddHousePlan and the road below), with the same three road
+ * tiles (KM_Hand.pas AddFirstStorehouse 2183-2223). The AI's stricter CanAddHousePlanAI (road-makeable
+ * choke points) is not used: a human is not held to it.
+ * Recorded deviation (docs/M5D-SPIKE.md section 7c): the spot choice is nearest-to-seed, not the cursor.
+ */
+function placeNearestStorehouse(world: EconomyWorld, hand: number, seed: { x: number; y: number }): number {
+  const RAD = 15;
+  const dx = world.houseSpecOf(HT_STORE)?.entranceDx ?? 0;
+  let best: { x: number; y: number } | null = null;
+  let bestDist = Infinity;
+  for (let x = Math.max(1, seed.x - RAD); x <= Math.min(world.mapX - 1, seed.x + RAD); x++) {
+    for (let y = Math.max(1, seed.y - RAD); y <= Math.min(world.mapY - 1, seed.y + RAD); y++) {
+      if (!world.canAddFieldPlan(hand, x, y + 1, 'road')) continue;
+      if (!world.canAddHousePlan(hand, HT_STORE, x, y)) continue;
+      const d = (x - seed.x) * (x - seed.x) + (y - seed.y) * (y - seed.y);
+      if (d < bestDist) {
+        bestDist = d;
+        best = { x, y };
+      }
+    }
+  }
+  if (best === null) return 0;
+  const house = world.spawnHouse(HT_STORE, best.x - dx, best.y, hand);
+  const entrance = house.entrance;
+  for (const p of [
+    { x: entrance.x, y: entrance.y + 1 },
+    { x: entrance.x - 1, y: entrance.y + 1 },
+    { x: entrance.x + 1, y: entrance.y + 1 },
+  ]) {
+    if (world.canAddFieldPlan(hand, p.x, p.y, 'road')) world.addRoadTile(p.x, p.y);
+  }
+  world.houseCreatedFor(hand, HT_STORE);
+  return house.uid;
+}
+
+/**
  * Build a skirmish: the economy world from the map and mission (tools/aisim's bootstrap for every
  * open hand), the start of each hand (store, kit, serfs and builders), one AiPlayer per AI slot with
  * its army and the Supervisor. Throws on a bad slot list or a map that does not parse.
@@ -411,7 +451,8 @@ export function createSkirmish(opts: CreateSkirmishOptions): Skirmish {
     if (firstStoreOf(world, s.hand) !== null) continue;
     const setup = setups[s.hand];
     const seedPoint = setup.centerScreen.x !== 0 ? setup.centerScreen : setup.startPosition;
-    if (placeFirstStorehouse(world, eye, s.hand, seedPoint) === 0) {
+    const placed = placeFirstStorehouse(world, eye, s.hand, seedPoint) || placeNearestStorehouse(world, s.hand, seedPoint);
+    if (placed === 0) {
       throw new Error(`skirmish: hand ${s.hand} has no store and placeFirstStorehouse found no spot near ${seedPoint.x},${seedPoint.y}`);
     }
   }

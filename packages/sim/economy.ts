@@ -103,6 +103,7 @@ import {
   WT_BREAD,
   WT_SAUSAGE,
   WT_FISH,
+  WT_CORN,
 } from '../assets/wares.ts';
 // M5a construction slice (docs/M5-SPIKE.md §1a/§2; construction.ts holds the plan stores).
 import type {
@@ -385,6 +386,16 @@ function houseDemandImportance(typeId: number, ware: number): number {
   return DI_NORM;
 }
 
+/** WareDistribution (KM_WareDistribution.pas 12–17, 71–88): the input cap of a ware/house pair, 5 for every pair
+ *  without a setting. The sim has no ratio setting, so the Pascal defaults apply. Used by the bid's KaMRandom(16 - 3*distr). */
+function wareDistribution(ware: number, typeId: number): number {
+  if (ware === WT_COAL && (typeId === HOUSE_TYPE_IRON_SMITHY || typeId === HOUSE_TYPE_WEAPON_SMITHY || typeId === HOUSE_TYPE_ARMOR_SMITHY)) return 3;
+  if (ware === WT_TIMBER && typeId === HOUSE_TYPE_ARMOR_WORKSHOP) return 2;
+  if (ware === WT_CORN && typeId === HOUSE_TYPE_MILL) return 4;
+  if (ware === WT_CORN && typeId === HOUSE_TYPE_STABLES) return 3;
+  return 5;
+}
+
 interface Offer {
   houseUid: number;
   ware: number;
@@ -446,6 +457,13 @@ const TROOPS_TRAINED_CONDITION = 0.6;
 const HOUSE_TYPE_QUARRY = 14;
 const HOUSE_TYPE_WEAPON_WORKSHOP = 19;
 const HOUSE_TYPE_ARMOR_WORKSHOP = 20;
+/** The houses of the ware-distribution defaults (KM_WareDistribution.pas 12–17; ai.ts HT_*). */
+const HOUSE_TYPE_IRON_SMITHY = 1;
+const HOUSE_TYPE_WEAPON_SMITHY = 2;
+const HOUSE_TYPE_STABLES = 12;
+const HOUSE_TYPE_TOWN_HALL = 18;
+const HOUSE_TYPE_MILL = 22;
+const HOUSE_TYPE_ARMOR_SMITHY = 10;
 const UNIT_CARPENTER = 5;
 const UNIT_STONEMASON = 10;
 /** WARFARE_MIN..WARFARE_MAX (wtWoodenShield..wtHorse): the barracks' input range (KM_HouseBarracks.pas 16). */
@@ -2654,6 +2672,8 @@ export class EconomyWorld {
           if (win !== null && imp < win.imp) continue;
           if (d.houseUid === offer.houseUid && d.unitUid === 0) continue; // no same-house deliveries
           if (this.demandAvailable(d) <= 0) continue;
+          const serf = nearestSerf(offerHouse);
+          if (serf.serf < 0) continue; // no idle serf can walk to the offer (AnySerfCanDoDelivery, KM_HandLogistics.pas 565)
           let cost: number;
           if (d.unitUid !== 0) {
             // A unit demand uses the walk route (KM_HandLogistics.pas 1223–1226): its step count is the cost.
@@ -2663,7 +2683,7 @@ export class EconomyWorld {
             if (!this.routeCanBeMade(pointBelowEntrance(offerHouse), tp)) continue; // tpWalk route
             const walk = findPath(this.grid, pointBelowEntrance(offerHouse), tp);
             if (walk === null) continue;
-            cost = walk.length;
+            cost = walk.length + this.drawN(10); // KaMRandom(10) (KM_HandLogistics.pas 1585)
           } else {
             const dHouse = this.houseByUid(d.houseUid);
             if (dHouse === null || dHouse.destroyed) continue;
@@ -2673,15 +2693,26 @@ export class EconomyWorld {
             const target = pointBelowEntrance(dHouse);
             const road = dist[this.index(target.x, target.y)];
             if (road < 0) continue; // no road route
-            cost = road;
+            cost = road + this.drawN(16 - 3 * wareDistribution(d.ware, dHouse.typeId)); // KaMRandom(16 - 3*distr) (KM_HandLogistics.pas 1554)
+            if (dHouse.buildState !== 'done') {
+              // Give priority to almost built houses, stone a little more (KM_HandLogistics.pas 1576–1579).
+              cost -= 4 * C.buildResDeliveredPercent(dHouse);
+              if (d.ware === WT_STONE) cost += 0.1;
+            } else {
+              cost += this.drawN(10); // KaMRandom(10) (KM_HandLogistics.pas 1585)
+            }
+            // Prefer houses with fewer supplies, except store, barracks and town hall (KM_HandLogistics.pas 1614–1618).
+            if (dHouse.typeId !== HOUSE_TYPE_STORE && dHouse.typeId !== HOUSE_TYPE_BARRACKS && dHouse.typeId !== HOUSE_TYPE_TOWN_HALL) {
+              cost += 20 * this.wareInCount(dHouse, d.ware);
+            }
             // Always prefer House>House to House>Store (KM_HandLogistics.pas 1587–1590: the wtAll bid gets +1000).
             if (dHouse.typeId === HOUSE_TYPE_STORE) cost += STORE_BID_PENALTY;
+            // Barracks: no weapons from a store while it holds more than 50 of that ware (KM_HandLogistics.pas 1633–1637).
+            if (dHouse.typeId === HOUSE_TYPE_BARRACKS && offerIsStore && this.wareInCount(dHouse, d.ware) > 50) cost += 10000;
           }
           // Prefer taking wares from a house rather than a store, except warfare (KM_HandLogistics.pas 1587–1590).
           if (offerIsStore && (d.ware < WARFARE_MIN || d.ware > WARFARE_MAX)) cost += STORE_BID_PENALTY;
           if (win !== null && imp === win.imp && cost >= win.cost) continue;
-          const serf = nearestSerf(offerHouse);
-          if (serf.serf < 0) continue; // no idle serf can walk to the offer (AnySerfCanDoDelivery)
           win = { offer, demand: d, house: offerHouse, serf: serf.serf, imp, cost };
         }
       }

@@ -14,4 +14,4 @@ export const MIN = {
 };
 
 /** The frozen state sha of one run (two runs in one process must match). */
-export const EXPECTED_SHA: string = 'f20ca3ae75506b39bb34442f9d7473ba727067ee7bfb3e7f373f07cde687881a';
+export const EXPECTED_SHA: string = 'ed2e07fe73f453c73b7430ddf054799a050f24d70e5936b46466c51026a1bf19';
