@@ -38,6 +38,12 @@ try {
   b.expect(b2v - b1v > (a2 - a1) * 1.5, `4x runs faster than 1x (${a2 - a1} vs ${b2v - b1v} ticks in 2 s)`);
   b.notes.push(`maps=${mapCount}`, `tick ${t1}->${t2}`, `1x=${a2 - a1}/2s 4x=${b2v - b1v}/2s`, `shots setup ${sz0} in-game ${sz1} bytes`);
 
+  // the fog regression: the player's own village used to go black ~30 game seconds in (tick ~300): look again later
+  await waitFor(async () => (await tick()) >= 450 ? true : null, 'tick >= 450 at 4x', 90000);
+  const szLate = await b.shot('b1-late');
+  b.expect(szLate > 150000, `the village is still visible at tick ${await tick()} (screenshot ${szLate} bytes; a black fog screen is ~60000)`);
+  b.notes.push(`late shot ${szLate} bytes`);
+
   await b.eval("document.getElementById('endbtn').click()"); await sleep(300);
   b.expect((await b.eval("!document.getElementById('end').classList.contains('hide')")) === true && String(await b.eval("document.getElementById('endtitle').textContent")).length > 0, 'end screen shows');
   await b.shot('b1-end');

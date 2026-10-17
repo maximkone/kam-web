@@ -47,6 +47,7 @@ import { parseHousesDat } from '../assets/housedata.ts';
 import { decodeMissionScript, parseMissionScript, parseMissionInfo, tokenizeMissionScript, MAX_HANDS } from '../mission/mission.ts';
 import type { Mission, MissionInfo } from '../mission/mission.ts';
 import { createEconomyWorld } from './economy.ts';
+import { refreshFog } from './fowrefresh.ts';
 import type { EconHouse, EconomyWorld } from './economy.ts';
 import {
   AiPlayer,
@@ -518,6 +519,7 @@ export function step(sk: Skirmish, commands: Command[]): StepResult {
     if (ai !== undefined && sk.status[slot.hand] === 'playing') ai.updateState(tick);
   }
   sk.world.tick();
+  refreshFog(sk.world); // DynamicFOW refresh of standing units and finished houses (fowrefresh.ts)
   checkGoalsForTick(sk.world, sk, tick);
   return { tick, results };
 }
