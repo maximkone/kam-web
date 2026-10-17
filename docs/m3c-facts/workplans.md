@@ -1,0 +1,35 @@
+<!-- Facts extracted from the Pascal source (_ref/kam_remake/src) by tools/flashpool (DeepSeek V4 Flash free), one single-shot job per file, 2026-10-17. Every row carries a src line and a verbatim quote; tools/flashpool/audit-facts.mjs checks that each quote appears at the cited line (+-3): 182 of 190 checkable rows verified (96%). Rows that cite several ranges or have no quote (mostly resunits.md) are unverified: re-read the Pascal before relying on them. -->
+
+# workplans
+
+| unit | house or place | steps (walk target, wait/anim ticks) | wares IN (type x count) | wares OUT (type x count) | cycle length in ticks | src | quote |
+|---|---|---|---|---|---|---|---|
+| utWoodcutter | htWoodcutters (taCut) | Walk uaWalkBooty to tree; uaWork x15; AfterWorkDelay 20; return uaWalkTool2 | none | wtTrunk x ResProductionX | NOT-IN-FILE | KM_UnitWorkPlan.pas:265-268 | WalkStyle(tmp, uaWalkBooty,uaWork,15,20,uaWalkTool2,gsWoodCutterCut); |
+| utWoodcutter | htWoodcutters (taPlant) | Walk uaWalkTool to place; uaWork x12; return uaWalk | none | none | NOT-IN-FILE | KM_UnitWorkPlan.pas:270-272 | uaWalkTool,uaWork,12,0,uaWalk,gsWoodCutterPlant); |
+| utMiner | htCoalMine | No walk; haWork1 x1; haWork2 x23; haWork5 x1 | none | wtCoal x ResProductionX | NOT-IN-FILE | KM_UnitWorkPlan.pas:286-294 | SubActAdd(haWork2,23); |
+| utMiner | htIronMine | No walk; haWork1 x1; haWork2 x24; haWork5 x1 | none | wtIronOre x ResProductionX | NOT-IN-FILE | KM_UnitWorkPlan.pas:300-308 | SubActAdd(haWork2,24); |
+| utMiner | htGoldMine | No walk; haWork1 x1; haWork2 x24; haWork5 x1 | none | wtGoldOre x ResProductionX | NOT-IN-FILE | KM_UnitWorkPlan.pas:313-322 | ResourcePlan(wtNone,0,wtNone,0,wtGoldOre); |
+| utAnimalBreeder | htSwine | No walk; haWork2 x5; haWork3 x4 | wtCorn x1 | wtPig x ResProductionX, wtSkin x ResProductionX | NOT-IN-FILE | KM_UnitWorkPlan.pas:326-335 | ResourcePlan(wtCorn,1,wtNone,0,wtPig,wtSkin); |
+| utAnimalBreeder | htStables | No walk; haWork1 x1; haWork2 x1; haWork3 x1; haWork4 x1; haWork5 x1 | wtCorn x1 | wtHorse x ResProductionX | NOT-IN-FILE | KM_UnitWorkPlan.pas:339-347 | ResourcePlan(wtCorn,1,wtNone,0,wtHorse); |
+| utFarmer | htFarm (taCut) | Walk uaWalkTool to field; uaWork x6; return uaWalkBooty | none | wtCorn x ResProductionX | NOT-IN-FILE | KM_UnitWorkPlan.pas:352-357 | ResourcePlan(wtNone,0,wtNone,0,wtCorn); |
+| utFarmer | htFarm (taPlant) | Walk uaWalk to field; uaWork1 x10; return uaWalk | none | none | NOT-IN-FILE | KM_UnitWorkPlan.pas:359 | WalkStyle(tmp, uaWalk,uaWork1,10,0,uaWalk,gsFarmerSow); |
+| utFarmer | htVineyard | Walk uaWalkTool2; uaWork2 x5; return uaWalkBooty2; haWork1 x1; haWork2 x11; haWork5 x1 | none | wtWine x ResProductionX | NOT-IN-FILE | KM_UnitWorkPlan.pas:366-373 | uaWalkTool2,uaWork2,5,0,uaWalkBooty2,gsFarmerWine); |
+| utCarpenter | htSawmill | No walk; haWork1 x1; haWork2 x25; haWork5 x1 | wtTrunk x1 | wtTimber x ResProductionX | NOT-IN-FILE | KM_UnitWorkPlan.pas:376-381 | ResourcePlan(wtTrunk,1,wtNone,0,wtTimber); |
+| utCarpenter | htArmorWorkshop (wtLeatherArmor) | No walk; haWork2+haWork3+haWork4 x4; haWork2 x0.25 | wtLeather x1 | wtLeatherArmor x ResProductionX | NOT-IN-FILE | KM_UnitWorkPlan.pas:385-395 | ResourcePlan(wtLeather,1,wtNone,0,wtLeatherArmor); |
+| utCarpenter | htArmorWorkshop (wtWoodenShield) | No walk; haWork2+haWork3+haWork4 x4; haWork2 x0.25 | wtTimber x1 | wtWoodenShield x ResProductionX | NOT-IN-FILE | KM_UnitWorkPlan.pas:398-408 | ResourcePlan(wtTimber,1,wtNone,0,wtWoodenShield); |
+| utCarpenter | htWeaponWorkshop (wtAxe) | No walk; haWork1 x1; haWork2+haWork3+haWork4 x3; haWork5 x1 | wtTimber x2 | wtAxe x ResProductionX | NOT-IN-FILE | KM_UnitWorkPlan.pas:411-422 | ResourcePlan(wtTimber,2,wtNone,0,wtAxe); |
+| utCarpenter | htWeaponWorkshop (wtLance) | No walk; haWork1 x1; haWork2+haWork3+haWork4 x3; haWork5 x1 | wtTimber x2 | wtLance x ResProductionX | NOT-IN-FILE | KM_UnitWorkPlan.pas:425-436 | ResourcePlan(wtTimber,2,wtNone,0,wtLance); |
+| utCarpenter | htWeaponWorkshop (wtBow) | No walk; haWork1 x1; haWork2+haWork3+haWork4 x3; haWork5 x1 | wtTimber x2 | wtBow x ResProductionX | NOT-IN-FILE | KM_UnitWorkPlan.pas:439-450 | ResourcePlan(wtTimber,2,wtNone,0,wtBow); |
+| utBaker | htMill | No walk; haWork2 x47 | wtCorn x1 | wtFlour x ResProductionX | NOT-IN-FILE | KM_UnitWorkPlan.pas:452-456 | ResourcePlan(wtCorn,1,wtNone,0,wtFlour); |
+| utBaker | htBakery | No walk; haWork2+haWork3 x7 | wtFlour x1 | wtBread x ResProductionX | NOT-IN-FILE | KM_UnitWorkPlan.pas:459-467 | ResourcePlan(wtFlour,1,wtNone,0,wtBread); |
+| utButcher | htTannery | No walk; haWork1 x1; haWork2 x29 | wtSkin x1 | wtLeather x ResProductionX | NOT-IN-FILE | KM_UnitWorkPlan.pas:469-474 | ResourcePlan(wtSkin,1,wtNone,0,wtLeather); |
+| utButcher | htButchers | No walk; haWork1 x1; haWork2+haWork4+haWork3 x6 | wtPig x1 | wtSausage x ResProductionX | NOT-IN-FILE | KM_UnitWorkPlan.pas:477-487 | ResourcePlan(wtPig,1,wtNone,0,wtSausage); |
+| utFisher | htFishermans | Walk uaWalk to water; uaWork2 x10; return uaWalkTool | none | wtFish x ResProductionX | NOT-IN-FILE | KM_UnitWorkPlan.pas:491-495 | WalkStyle(tmp,uaWalk,uaWork2,10,0,uaWalkTool,gsFisherCatch); |
+| utStonemason | htQuarry | Walk uaWalk to stone; uaWork x8; return uaWalkTool; haWork1 x1; haWork2 x9; haWork5 x1 | none | wtStone x ResProductionX | NOT-IN-FILE | KM_UnitWorkPlan.pas:500-509 | ResourcePlan(wtNone,0,wtNone,0,wtStone); |
+| utSmith | htArmorSmithy (wtIronShield) | No walk; haWork2+haWork3+haWork4 x4; haWork2 x1; haWork5 x1 | wtIron x1, wtCoal x1 | wtIronShield x ResProductionX | NOT-IN-FILE | KM_UnitWorkPlan.pas:514-525 | ResourcePlan(wtIron,1,wtCoal,1,wtIronShield); |
+| utSmith | htArmorSmithy (wtIronArmor) | No walk; haWork2+haWork3+haWork4 x4; haWork2 x1; haWork5 x1 | wtIron x1, wtCoal x1 | wtIronArmor x ResProductionX | NOT-IN-FILE | KM_UnitWorkPlan.pas:528-539 | ResourcePlan(wtIron,1,wtCoal,1,wtIronArmor); |
+| utSmith | htWeaponSmithy (wtSword) | No walk; haWork1 x1; haWork2+haWork3+haWork4 x3; haWork5 x1 | wtIron x1, wtCoal x1 | wtSword x ResProductionX | NOT-IN-FILE | KM_UnitWorkPlan.pas:542-553 | ResourcePlan(wtIron,1,wtCoal,1,wtSword); |
+| utSmith | htWeaponSmithy (wtPike) | No walk; haWork1 x1; haWork2+haWork3+haWork4 x3; haWork5 x1 | wtIron x1, wtCoal x1 | wtPike x ResProductionX | NOT-IN-FILE | KM_UnitWorkPlan.pas:556-567 | ResourcePlan(wtIron,1,wtCoal,1,wtPike); |
+| utSmith | htWeaponSmithy (wtCrossbow) | No walk; haWork1 x1; haWork2+haWork3+haWork4 x3; haWork5 x1 | wtIron x1, wtCoal x1 | wtCrossbow x ResProductionX | NOT-IN-FILE | KM_UnitWorkPlan.pas:570-581 | ResourcePlan(wtIron,1,wtCoal,1,wtCrossbow); |
+| utMetallurgist | htIronSmithy | No walk; haWork2+haWork3 x4; haWork2 x1; haWork3 x0.25 | wtIronOre x1, wtCoal x1 | wtIron x ResProductionX | NOT-IN-FILE | KM_UnitWorkPlan.pas:584-593 | ResourcePlan(wtIronOre,1,wtCoal,1,wtIron); |
+| utMetallurgist | htMetallurgists | No walk; haWork2+haWork3+haWork4 x4; haWork2 x1; haWork3 x0.1 | wtGoldOre x1, wtCoal x1 | wtGold x ResProductionX | NOT-IN-FILE | KM_UnitWorkPlan.pas:595-606 | ResourcePlan(wtGoldOre,1,wtCoal,1,wtGold); |
