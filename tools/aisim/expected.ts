@@ -9,6 +9,30 @@ export const TICKS = 30000;
 /** The attack run's length (docs/M5-SPIKE.md 7.5): the economy plus the army against the enemies' stores. */
 export const ATTACK_TICKS = 12000;
 
+/** The organic run's length (docs/M5-SPIKE.md 7.6): the economy scenario with no military grants. */
+export const ORGANIC_TICKS = 60000;
+
+/**
+ * The frozen organic chain (worker N2, docs/M5-SPIKE.md 7.6): the economy scenario with no military grants,
+ * 60000 ticks. No link is reached: no stone is produced (quarries never work in the port), so the sawmill
+ * reservation never places, so the barracks is never wanted (KM_CityPredictor.pas 468: warfare > 0 needed).
+ */
+export const EXPECTED_ORGANIC = {
+  links: [
+    { link: 'quarry produces stone (stone-* events)', reached: false, tick: null, value: 0 },
+    { link: 'sawmill placed (house-wip type=0)', reached: false, tick: null, value: 0 },
+    { link: 'barracks wanted (predictor requires it)', reached: false, tick: null, value: 0 },
+    { link: 'barracks placed (house-wip type=21)', reached: false, tick: null, value: 0 },
+    { link: 'barracks built (house-activated type=21)', reached: false, tick: null, value: 0 },
+    { link: 'recruits trained (school-unit-trained type=13)', reached: false, tick: null, value: 0 },
+    { link: 'weapons/armour produced (ware-produced events)', reached: false, tick: null, value: 0 },
+    { link: 'weapons/armour in stock at the end (warfare wares)', reached: false, tick: null, value: 0 },
+    { link: 'soldiers equipped (barracks-equipped)', reached: false, tick: null, value: 0 },
+    { link: 'army groups formed (military groups with members)', reached: false, tick: null, value: 0 },
+  ] as { link: string; reached: boolean; tick: number | null; value: number }[],
+  sha256: 'c2fe7b1c5fdc15b49a6c23792fa6790053fce96abab9a40adfcd268d385b3eb8',
+};
+
 /**
  * The frozen attack-run numbers (worker N, M5c): the AI hand 1 of Battle Sun with a military kit, a
  * finished barracks, 12 recruits waiting in it and 6 militia groups; each other hand has a 6-militia

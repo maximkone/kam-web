@@ -44,18 +44,23 @@ import {
   Eye,
   Influences,
   UT_BUILDER,
+  UT_KNIGHT,
   UT_MILITIA,
   UT_RECRUIT,
   UT_SERF,
   HT_BARRACKS,
+  HT_QUARRY,
+  HT_SAWMILL,
   HT_STORE,
+  WARE_WARFARE_MAX,
+  WARE_WARFARE_MIN,
   applyMissionHouseUnlocks,
   parseAiSetups,
   placeFirstStorehouse,
 } from '../../packages/sim/ai.ts';
 import { ArmyManagement } from '../../packages/sim/aiarmy.ts';
 import { AiSupervisor } from '../../packages/sim/aisupervisor.ts';
-import { TICKS, ATTACK_TICKS, EXPECTED, EXPECTED_ATTACK } from './expected.ts';
+import { TICKS, ATTACK_TICKS, ORGANIC_TICKS, EXPECTED, EXPECTED_ATTACK, EXPECTED_ORGANIC } from './expected.ts';
 
 const INSTALL = process.env.KAM_INSTALL ?? 'C:/Users/me/Desktop/KaM Remake/KaM Remake Beta r15472';
 const DEFINES_DIR = process.env.KAM_DATA ?? `${INSTALL}/data/defines`;
@@ -717,6 +722,70 @@ function printAttack(sim: Sim, finals: AttackFinals, sha: string): void {
   console.log(`ATTACK SHA256 ${sha} (units=${sim.world.units.length} groups=${sim.world.groupList().length})`);
 }
 
+/** One link of the organic army chain (docs/M5-SPIKE.md 7.6): reached, the first tick, a value. */
+interface ChainLink {
+  link: string;
+  reached: boolean;
+  tick: number | null;
+  value: number;
+}
+
+/**
+ * The organic run (worker N2, docs/M5-SPIKE.md 7.6): the economy scenario with NO military grants (no kit,
+ * no barracks, no recruits, no start army, no enemy garrison) for ORGANIC_TICKS ticks. It reports, link by
+ * link, how far the AI's army chain gets: quarry → sawmill → barracks wanted/placed/built → recruits →
+ * weapons/armour → equipped soldiers → army groups.
+ */
+function organicRun(opts: Options, ticks: number): { sim: Sim; links: ChainLink[]; elapsed: number } {
+  const sim = buildSim(opts, 'economy');
+  const { world, ai } = sim;
+  const hand = sim.summary.hand;
+  let barracksWanted: number | null = null;
+  const start = Date.now();
+  advance(sim, ticks, (tick) => {
+    if (barracksWanted === null && ai.predictor.requiredHouses[HT_BARRACKS] > 0) barracksWanted = tick;
+  });
+  const elapsed = Date.now() - start;
+
+  const firstTick = (re: RegExp): number | null => {
+    const e = world.events.find((x) => re.test(x.text));
+    return e === undefined ? null : e.tick;
+  };
+  const countText = (re: RegExp): number => world.events.filter((x) => re.test(x.text)).length;
+  const houses = (typeId: number, done: boolean): number =>
+    world.houses.filter((h) => h.owner === hand && !h.destroyed && h.typeId === typeId && (!done || h.buildState === 'done')).length;
+  const houseTick = (typeId: number, prefix: string): number | null => firstTick(new RegExp(`^${prefix} house#\\d+ type=${typeId}( |$)`));
+  const stock = (ware: number): number => world.handWareBalance(hand, ware);
+  let warfare = 0;
+  for (let w = WARE_WARFARE_MIN; w <= WARE_WARFARE_MAX; w++) warfare += stock(w);
+  const armyGroups = world.groupList().filter((g) => g.owner === hand && g.groupType >= UT_MILITIA && g.groupType <= UT_KNIGHT && g.memberUids.length > 0).length;
+  const link = (name: string, tick: number | null, value: number): ChainLink => ({ link: name, reached: tick !== null, tick, value });
+
+  const links: ChainLink[] = [
+    link('quarry produces stone (stone-* events)', firstTick(/^stone-/), countText(/^stone-/)),
+    link('sawmill placed (house-wip type=0)', houseTick(HT_SAWMILL, 'house-wip'), houses(HT_SAWMILL, false)),
+    link('barracks wanted (predictor requires it)', barracksWanted, ai.predictor.requiredHouses[HT_BARRACKS]),
+    link('barracks placed (house-wip type=21)', houseTick(HT_BARRACKS, 'house-wip'), houses(HT_BARRACKS, false)),
+    link('barracks built (house-activated type=21)', houseTick(HT_BARRACKS, 'house-activated'), houses(HT_BARRACKS, true)),
+    link('recruits trained (school-unit-trained type=13)', firstTick(new RegExp(`^school-unit-trained unit#\\d+ type=${UT_RECRUIT}$`)), countText(new RegExp(`^school-unit-trained unit#\\d+ type=${UT_RECRUIT}$`))),
+    link('weapons/armour produced (ware-produced events)', firstTick(/^ware-produced /), countText(/^ware-produced /)),
+    link('weapons/armour in stock at the end (warfare wares)', null, warfare),
+    link('soldiers equipped (barracks-equipped)', firstTick(/^barracks-equipped /), countText(/^barracks-equipped /)),
+    link('army groups formed (military groups with members)', null, armyGroups),
+  ];
+  links[7].reached = warfare > 0;
+  links[9].reached = armyGroups > 0;
+  return { sim, links, elapsed };
+}
+
+function printOrganic(sim: Sim, links: ChainLink[], sha: string, ticks: number): void {
+  console.log(`ORGANIC CHAIN (${ticks} ticks, no military grants, hand ${sim.summary.hand}):`);
+  for (const l of links) {
+    console.log(`ORGANIC link="${l.link}" reached=${l.reached ? 'yes' : 'no'} tick=${l.tick ?? '-'} value=${l.value}`);
+  }
+  console.log(`ORGANIC SHA256 ${sha} (units=${sim.world.units.length} groups=${sim.world.groupList().length})`);
+}
+
 function main(): void {
   const opts = parseArgs(process.argv.slice(2));
   if (!opts.check && opts.ticks === null && !opts.json && opts.scenario === 'economy') {
@@ -756,9 +825,23 @@ function main(): void {
     compare('attack sha256', attackSha, EXPECTED_ATTACK.sha256, attackProblems);
     console.log(`AI ATTACK CHECK ${attackProblems.length === 0 ? 'PASS' : 'FAIL'} (${run.finals.ticks} ticks, ${run.elapsed} ms)`);
 
-    const all = [...problems.map((p) => `econ ${p}`), ...attackProblems.map((p) => `attack ${p}`)];
+    const organicProblems: string[] = [];
+    const organic = organicRun(opts, ORGANIC_TICKS);
+    const organicSha = stateSha(organic.sim);
+    printOrganic(organic.sim, organic.links, organicSha, ORGANIC_TICKS);
+    compare('links', organic.links, EXPECTED_ORGANIC.links, organicProblems);
+    compare('sha256', organicSha, EXPECTED_ORGANIC.sha256, organicProblems);
+    console.log(`AI ORGANIC CHECK ${organicProblems.length === 0 ? 'PASS' : 'FAIL'} (${organic.sim.world.tickCount} ticks, ${organic.elapsed} ms)`);
+
+    const all = [
+      ...problems.map((p) => `econ ${p}`),
+      ...attackProblems.map((p) => `attack ${p}`),
+      ...organicProblems.map((p) => `organic ${p}`),
+    ];
     if (all.length === 0) {
-      console.log(`AI CHECK PASS (economy ${sim.world.tickCount} ticks, ${sim.world.events.length} events; attack ${run.finals.ticks} ticks)`);
+      console.log(
+        `AI CHECK PASS (economy ${sim.world.tickCount} ticks, ${sim.world.events.length} events; attack ${run.finals.ticks} ticks; organic ${organic.sim.world.tickCount} ticks)`,
+      );
     } else {
       console.log(`AI CHECK FAIL:\n  ${all.join('\n  ')}`);
       process.exitCode = 1;

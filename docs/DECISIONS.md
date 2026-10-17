@@ -2,6 +2,24 @@
 
 Newest first. Only decisions the lead/owner actually made, with evidence.
 
+## 2026-10-17 - N2 result: the AI cannot raise an army because the ECONOMY SIM is incomplete
+
+- Lead re-ran: `AI CHECK PASS (economy 30000; attack 12000; organic 60000 ticks)` twice identical (organic sha
+  `c2fe7b1c...`), `npm test` 125/125, WALK/ECON/COMBAT/BUILD/MAPSCAN unchanged. Record: `docs/M5-SPIKE.md` 7.6.
+- Both of worker N's "open items" had the wrong cause. The organic AI never reserves a barracks: it reserves
+  its prerequisite, the sawmill, and stone runs out first (`KM_CityBuilder.pas:1330-1332`). **The port has no
+  quarry stone production, no weapon/armour production, no mines or smithies** (M3 only ported one chain,
+  forest -> sawmill -> boards). So no stone, no sawmill, no barracks, no weapons, no army.
+- The school gold stall is real only in the attack scenario (a second school was dug over the first one's
+  road tiles; the Pascal allows it too, no divergence proven). Left open.
+- Decision (lead): quick path first, full fidelity later. (1) quarry stone production, (2) weapon workshop
+  (timber -> weapons), (3) a skirmish "rich start" option (documented stock of weapons/armour so an AI hand can
+  field an army early). Then M5d-B (UI). The full chain (tannery, swine, farms/mill/bakery, mines, smithies,
+  metallurgists) is a later economy-completion milestone.
+- Incident: worker N2 recursively deleted a stray `C:\empire\Users` that its own probe had created by a bad
+  relative path. Checked: it did not exist before, `C:\empire` top level is intact. Workers must write scratch
+  files only with absolute paths under `$env:TEMP\opencode` and never delete.
+
 ## 2026-10-17 - M5c accepted: the Advanced AI's military half (worker N)
 
 - Lead re-ran everything independently: `AI CHECK PASS (economy 30000 ticks, 843 events; attack 12000

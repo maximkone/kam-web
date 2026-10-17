@@ -317,3 +317,76 @@ every other hand gets a 6-militia garrison beside its store.
 
 **Not done:** the browser match against the AI on a real map (the spec's browser step; the aisim check is the
 acceptance here). The viewer does not show the army (groups, defence lines) yet.
+
+### 7.6 Worker N2 — the organic army: investigated, not raised (the chain is blocked by production scope)
+
+Goal: the AI raises its own army in the organic run, no scenario grants. **Result: no link of the chain is
+reached.** The two bugs of 7.5 were reproduced and traced; neither is the cause, and no fix landed. Premises
+corrected below. The measured chain is frozen so a future production change shows up as a moved number.
+
+- `node tools/aisim/cli.ts --check` → `AI CHECK PASS (economy 30000 ticks, 843 events; attack 12000 ticks; organic
+  60000 ticks)` (exit 0), run twice, identical: economy sha `1a425dcd…` (unchanged), attack sha `d1825fa9…`
+  (unchanged), **organic sha `c2fe7b1c5fdc15b49a6c23792fa6790053fce96abab9a40adfcd268d385b3eb8`** (new, frozen in
+  `tools/aisim/expected.ts` as `EXPECTED_ORGANIC`). The organic phase is the economy scenario with **no military
+  grants** (no kit, no barracks, no recruits, no start army, no garrison) for 60000 ticks; the check takes about
+  40–50 s in total.
+- **Organic chain (60000 ticks, hand 1, Battle Sun)** — every link is "no":
+
+  | link | reached | first tick | value |
+  |---|---|---|---|
+  | quarry produces stone (`stone-*` events) | no | – | 0 stone events (5 quarries built, 0 produced) |
+  | sawmill placed (`house-wip type=0`) | no | – | 0 sawmills |
+  | barracks wanted (predictor `requiredHouses[21] > 0`) | no | – | 0 |
+  | barracks placed (`house-wip type=21`) | no | – | 0 |
+  | barracks built (`house-activated type=21`) | no | – | 0 |
+  | recruits trained (`school-unit-trained type=13`) | no | – | 0 |
+  | weapons/armour produced (`ware-produced`) | no | – | 0 (the port has no workshop or smithy output) |
+  | warfare wares in stock at the end | no | – | 0 |
+  | soldiers equipped (`barracks-equipped`) | no | – | 0 |
+  | army groups formed (military groups with members) | no | – | 0 (81 units, all civilians) |
+
+- **Bug 1 (barracks never placed): the premise was wrong for the organic run.** No barracks is reserved or
+  planned at any tick. The reservation is the **sawmill** (the barracks' unlock prerequisite,
+  `_ref/.../src/res/KM_ResHouses.pas:275` `UnlockedByHouse: htSawmill`): planned at (43,106) with `placed=false,
+  houseReservation=true` from about t=3000 (the woodcutter, which unlocks the sawmill, is complete at about t=6000).
+  Root cause, traced by probes (`dbg2`–`dbg4`, scratch, not committed):
+  1. The builder's `CheckHouseReservation` only considers `RESERVATION_FullSet[0..STONE_SHORTAGE_IDX=2]` (school,
+     inn, quarry) while `fStoneShortage` holds (`KM_CityBuilder.pas:1330–1332`; port `ai.ts:4664`). The sawmill
+     is index 5, so its reservation is never placed under a stone shortage.
+  2. Stone stock falls 80 → 58 → 15 → 5 (t 1000 → 3000 → 6000 → 10000): roads (1 stone per tile) and houses consume
+     it. The shortage flag is set from t≈6000 on (`checkBasicMaterials`, `KM_CityBuilder.pas:837`, port
+     `ai.ts:4334`; the nine constants checked against `KM_AIParameters.pas` 264–274 and 319 are equal).
+  3. The stone never comes back, because **the port has no quarry production**: the economy builds 5 quarries and
+     trains 3 stonemasons, but `economy.ts` has no quarry work (no `stone-*` event exists; the M3 economy models
+     only the woodcutter and the sawmill).
+  4. Even with stone, the barracks is wanted only when `warfare > 0` and tick > 18000
+     (`KM_CityPredictor.pas:468`, port `ai.ts:2310–2315`). The organic economy has no weapons or armour, so the
+     predictor never asks for a barracks. Weapons come from workshops and smithies, which the port does not run.
+  So the blocker is **missing production** (quarry, mines, coal/iron/gold, smithies, weapon and armour
+  workshops), an M3-scope extension, not a placement or reservation defect in the builder.
+- **Bug 2 (school stalls on gold): the premise was wrong for the organic run.** In the organic run the school's gold
+  slot is full (`wareIn=[5,0,0,0]`), its gold demand is 0 by design, and its queue is empty from about t=12000:
+  no unit type is demanded, because mines and smithies do not exist in v0 (`dbg5`).
+  In the **attack run** the stall is real (`dbg5`, `dbg6`): school #131 has a free gold demand (5 available),
+  the store holds 54 gold, the gold offer and an idle serf both exist, but `roadDistances(store → school) = -1`.
+  The school's only road is cut at (40,118) and (42,118), which are now `tlDigged` (`lock=1`). The digging comes
+  from a second school (#160) placed at t=2873 (`house-wip`) over those road tiles and dug at t=3413
+  (`dbg8`–`dbg10`). The port's rule matches the Pascal's: the planner accepts a footprint over a built road
+  tile because `tpBuild` does not exclude the road overlay (`economy.ts:2420–2440` vs `KM_Terrain.pas:3792–3806`,
+  `KM_Eye.pas:1618`, `KM_Eye.pas:851`), and digging takes every footprint cell (`KM_UnitTaskBuild.pas:741`). I could
+  not prove a divergence from the Pascal here, so **no fix**. Open decision for the lead: whether the AI should be
+  stopped from planning over its own road (a rule the Pascal may enforce elsewhere; not verified).
+- **No fix landed**, so no regression test was added for the two bugs. The change is the organic phase only
+  (`tools/aisim/cli.ts` `organicRun` / `printOrganic`; `expected.ts` `ORGANIC_TICKS`, `EXPECTED_ORGANIC`).
+- Regressions (unchanged): `WALK CHECK PASS`; `ECON CHECK PASS` sha `6d780b62…`; `COMBAT CHECK PASS` sha `09a19821…`;
+  `BUILD CHECK PASS` sha `98b80525…`; `MAPSCAN CHECK PASS (243 maps, 0 anomalies)`.
+- `npm test` **125/125** (`# pass 125`, `# fail 0`).
+- `npx tsc --noEmit` **exit 1**, all four errors in `tools/skirmish/cli.ts` (lines 196, 201: implicit `any`). That
+  directory and `packages/sim/skirmish.ts` are **untracked and not from this worker**; the aisim changes add no
+  error. Left untouched for their owner.
+
+**What would move the chain (ordered by impact, for the next worker):** (1) quarry production (a stonemason at a
+quarry cuts stone into the store), which unblocks the sawmill reservation; (2) a weapon workshop (timber → axe)
+so `warfare > 0` and the predictor asks for the barracks; (3) armour/shield production, the school's recruits
+and barracks equip; (4) mines plus a smithy for the metal weapons. Each step is an M3-style production model in
+`economy.ts`; the chain table above is the test for each.
