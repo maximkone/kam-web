@@ -66,10 +66,12 @@
 //  - Mine production is out of the v0 economy slice (only hut/sawmill work), so a planned
 //    quarry/mine/farm produces nothing yet; the planner/builder still place them (faithful).
 //
-// Worker N interfaces (the military half builds on these):
-//  - `AiPlayer`: owns eye/predictor/planner/builder/cityManagement; `armyManagement` is the null
-//    slot updated between the Eye context switch and CityManagement (KM_AI.pas 567–572);
-//    `eye.armyEvaluation` is the matching slot in the shared Eye (KM_Eye.pas 758–761).
+// The military half (M5c, docs/M5-SPIKE.md 7.5) is in aiarmy.ts (ArmyManagement: recruit/equip,
+// CheckAttack, combat groups, defence positions) and aisupervisor.ts (the Supervisor: attack requests,
+// defence-position lines, the mine division). It attaches to the hand's AiPlayer through `attachArmy`:
+//  - `AiPlayer`: owns eye/predictor/planner/builder/cityManagement; `army` is the slot updated between
+//    the Eye context switch and CityManagement (KM_AI.pas 567–572); `eye.armyEvaluation` is the
+//    matching slot in the shared Eye (KM_Eye.pas 758–761), unused (the army-power model is not ported).
 //  - `CityManagement.requiredWeapons` (wtWoodenShield..wtHorse: available/required/fraction) and
 //    `warriorsDemands` (utMilitia..utKnight) are the recruit/equip inputs (KM_CityManagement.pas
 //    30–31, 776–1044); `OrderWeapons` needs a house WareOrder the v0 world does not have.
@@ -252,10 +254,19 @@ export const PRODUCTION_RATE: number[] = [
 ];
 
 /**
- * The AI_Par table (KM_AIParameters.pas 213–387) — the economy-half entries, exact values.
- * The army entries are not copied here (worker N's half).
+ * The AI_Par table (KM_AIParameters.pas 213–387) — the economy-half entries and the ATTACK_SQUAD
+ * entries (the military half, aiarmy.ts), exact values. The ATTACK_ArmyVectorField and
+ * ATTACK_SUPERVISOR entries are not copied (the army vector is not ported).
  */
 export const AI_PAR = {
+  ATTACK_SQUAD_ChangeTarget_Delay: 416.4127197,
+  ATTACK_SQUAD_MinWalkingDistance: 5.0,
+  ATTACK_SQUAD_TargetReached_House: 8.0,
+  ATTACK_SQUAD_TargetReached_Position: 5.0,
+  ATTACK_SQUAD_TargetReached_RangedSquad: 10.2428083,
+  ATTACK_SQUAD_TargetReached_Unit: 35.0,
+  ATTACK_SQUAD_TrafficDetection_Limit: 1.0,
+  ATTACK_SQUAD_TrafficDetection_Threshold: 10.0,
   BUILDER_BuildHouse_FieldMaxWork: 1.6684477,
   BUILDER_BuildHouse_RTPMaxWork: 11.6014986,
   BUILDER_BuildHouse_RoadMaxWork: 21.677248,
@@ -395,6 +406,43 @@ export interface AiSetup {
   startPosition: Pt;
   /** !CENTER_SCREEN (x+1, y+1) — PlaceFirstStorehouse's seed point; (0,0) when absent. */
   centerScreen: Pt;
+  /** !SET_AI_AUTO_DEFEND (default false): the Supervisor distributes the defence positions. */
+  autoDefend: boolean;
+  /** !SET_AI_CHARACTER TROUP_PARAM per group type (melee..mounted, script index 0..3): the formation. */
+  troopFormations: { numUnits: number; unitsPerRow: number }[];
+  /** !SET_AI_DEFENSE records, in script order (General.DefencePositions, KM_AIDefensePos.pas). */
+  defencePositions: ScriptDefencePosition[];
+  /** !SET_AI_ATTACK / !COPY_AI_ATTACK records, in script order (General.Attacks, KM_AIAttacks.pas). */
+  attacks: ScriptAttack[];
+}
+
+/** One !SET_AI_DEFENSE record (TAIDefencePosition, KM_AIDefensePos.pas). */
+export interface ScriptDefencePosition {
+  pos: Pt;
+  /** dir 1..8 (dirN..dirNW). */
+  dir: number;
+  /** Group type script index 0..3 (gtMelee..gtMounted). */
+  groupType: number;
+  radius: number;
+  /** TKMAIDefencePosType: dtFrontLine (0) or dtBackLine (1). */
+  backLine: boolean;
+}
+
+/** One scripted attack (TKMAIAttack, KM_AIAttacks.pas 15–26). */
+export interface ScriptAttack {
+  uid: number;
+  /** aatRepeating (script TYPE 0 or 2) or aatOnce (TYPE 1). */
+  repeating: boolean;
+  hasOccured: boolean;
+  delay: number;
+  totalMen: number;
+  /** Squads per group type, script index 0..3 (melee..mounted). */
+  groupAmounts: number[];
+  randomGroups: boolean;
+  /** TKMAIAttackTarget: 0 closest unit, 1 closest building from the army, 2 from the start, 3 custom. */
+  target: number;
+  range: number;
+  customPosition: Pt;
 }
 
 /** The defaults of TKMHandAISetup.Create (KM_AISetup.pas 11–83). */
@@ -419,6 +467,25 @@ export function defaultAiSetup(hand: number): AiSetup {
     unlimitedEquip: false,
     startPosition: kmPoint(1, 1),
     centerScreen: kmPoint(0, 0),
+    autoDefend: false,
+    troopFormations: [0, 1, 2, 3].map(() => ({ numUnits: 9, unitsPerRow: 3 })), // TKMArmyDefence.Create (KM_ArmyDefence.pas 206–210)
+    defencePositions: [],
+    attacks: [],
+  };
+}
+
+/** A fresh TKMAIAttack record (FillChar 0 — ctClearAIAttack, KM_MissionScript_Standard.pas 806). */
+function blankScriptAttack(): Omit<ScriptAttack, 'uid'> {
+  return {
+    repeating: false,
+    hasOccured: false,
+    delay: 0,
+    totalMen: 0,
+    groupAmounts: [0, 0, 0, 0],
+    randomGroups: false,
+    target: 0,
+    range: 0,
+    customPosition: kmPoint(0, 0),
   };
 }
 
@@ -437,6 +504,10 @@ export function parseAiSetups(bytes: Uint8Array, info: MissionInfo, mapX = 0, ma
   for (let h = 0; h < MAX_HANDS; h++) setups.push(defaultAiSetup(h));
 
   let hand = -1;
+  // fAIAttack (KM_MissionScript_Standard.pas): one record that the script fills in piece by piece;
+  // ctCopyAIAttack stores a copy and ctClearAIAttack resets it (it is not reset per hand).
+  let pending = blankScriptAttack();
+  let nextAttackUid = 1;
   const inRange = (h: number): boolean => h >= 0 && h < MAX_HANDS;
   const inMap = (x: number, y: number): boolean => mapX <= 0 || (x >= 1 && x <= mapX && y >= 1 && y <= mapY);
   const setup = (): AiSetup | null => (inRange(hand) ? setups[hand] : null);
@@ -467,6 +538,44 @@ export function parseAiSetups(bytes: Uint8Array, info: MissionInfo, mapX = 0, ma
       case '!SET_AI_UNLIMITED_EQUIP':
         if (setup() !== null) (setup() as AiSetup).unlimitedEquip = true;
         break;
+      case '!SET_AI_AUTO_DEFEND':
+        if (setup() !== null) (setup() as AiSetup).autoDefend = true;
+        break;
+      case '!SET_AI_DEFENSE': {
+        // KM_MissionScript_Standard.pas 760–762: P[2] = dir−1, P[3] = group type index (0..3).
+        const s = setup();
+        if (s !== null && inMap(p[0] + 1, p[1] + 1) && p[3] >= 0 && p[3] <= 3) {
+          s.defencePositions.push({
+            pos: kmPoint(p[0] + 1, p[1] + 1),
+            dir: p[2] + 1,
+            groupType: p[3],
+            radius: p[4],
+            backLine: p[5] === 1,
+          });
+        }
+        break;
+      }
+      case '!SET_AI_ATTACK': {
+        // KM_MissionScript_Standard.pas 771–793: the parameter names are the Pascal's AI_ATTACK_PARAMS.
+        const name = textParam;
+        if (name === 'TYPE' && p[1] >= 0 && p[1] <= 2) pending.repeating = p[1] !== 1; // RemakeAttackType
+        else if (name === 'TOTAL_AMOUNT') pending.totalMen = p[1];
+        else if (name === 'COUNTER') pending.delay = p[1];
+        else if (name === 'RANGE') pending.range = p[1];
+        else if (name === 'TROUP_AMOUNT' && p[1] >= 0 && p[1] <= 3) pending.groupAmounts[p[1]] = p[2];
+        else if (name === 'TARGET') pending.target = p[1];
+        else if (name === 'POSITION') pending.customPosition = kmPoint(p[1] + 1, p[2] + 1);
+        else if (name === 'TAKEALL') pending.randomGroups = true;
+        break;
+      }
+      case '!COPY_AI_ATTACK': {
+        const s = setup();
+        if (s !== null) s.attacks.push({ ...pending, groupAmounts: pending.groupAmounts.slice(), uid: nextAttackUid++, hasOccured: false });
+        break;
+      }
+      case '!CLEAR_AI_ATTACK':
+        pending = blankScriptAttack();
+        break;
       case '!SET_AI_CHARACTER': {
         const s = setup();
         if (s === null) break;
@@ -486,6 +595,7 @@ export function parseAiSetups(bytes: Uint8Array, info: MissionInfo, mapX = 0, ma
         else if (name === 'TOWN_DEFENSE' && p[1] >= 0) s.townDefence = p[1];
         else if (name === 'ATTACK_FACTOR' && p[1] >= 0) s.aggressiveness = p[1];
         else if (name === 'AUTO_ATTACK_RANGE' && p[1] >= 0) s.autoAttackRange = p[1];
+        else if (name === 'TROUP_PARAM' && p[1] >= 0 && p[1] <= 3) s.troopFormations[p[1]] = { numUnits: p[2], unitsPerRow: p[3] };
         break;
       }
       default:
@@ -5169,6 +5279,12 @@ export function placeFirstStorehouse(world: EconomyWorld, eye: Eye, hand: number
 // ---------------------------------------------------------------------------------------------
 // AiPlayer (ai/KM_AI.pas 529–585; the economy half)
 
+/** The army-management slot (TKMHandAI.fArmyManagement): aiarmy.ts's ArmyManagement implements it. */
+export interface ArmySlot {
+  afterMissionInit(): void;
+  updateState(tick: number): void;
+}
+
 /**
  * The per-hand advanced AI (economy half). `updateState(tick)` mirrors TKMHandAI.UpdateState:
  * the shared Eye is context-switched to this hand, then ArmyManagement (worker N's slot) and
@@ -5183,8 +5299,8 @@ export class AiPlayer {
   readonly planner: CityPlanner;
   readonly builder: CityBuilder;
   readonly cityManagement: CityManagement;
-  /** Worker N's army-management slot (TKMHandAI.fArmyManagement). */
-  armyManagement: unknown = null;
+  /** The military half (M5c, aiarmy.ts) — TKMHandAI.fArmyManagement; null = economy only. */
+  army: ArmySlot | null = null;
   started = false;
 
   constructor(world: EconomyWorld, influences: Influences, eye: Eye, setup: AiSetup) {
@@ -5211,22 +5327,27 @@ export class AiPlayer {
     return out;
   }
 
-  /** AfterMissionInit (KM_AI.pas 529–545) for the economy half. */
+  /** Attach the military half (TKMHandAI.fArmyManagement, created with the hand's AI). */
+  attachArmy(army: ArmySlot): void {
+    this.army = army;
+  }
+
+  /** AfterMissionInit (KM_AI.pas 529–545) for the economy half and the army. */
   afterMissionInit(): void {
     if (!this.setup.newAI) return;
     this.eye.ownerUpdate(this.hand);
     this.cityManagement.afterMissionInit(this.eye, this.planner);
-    // fArmyManagement.AfterMissionInit — worker N.
+    this.army?.afterMissionInit();
     this.started = true;
   }
 
-  /** UpdateState (548–585): Eye context switch → army (N) → city management. */
+  /** UpdateState (548–585): Eye context switch → army → city management. */
   updateState(tick: number): void {
     if (!this.setup.newAI) return;
     this.eye.ownerUpdate(this.hand);
     this.eye.buildFF.setTick(tick);
     this.influences.updateState(tick);
-    // fArmyManagement.UpdateState(aTick) — worker N's slot.
+    this.army?.updateState(tick);
     this.cityManagement.updateState(tick);
   }
 }

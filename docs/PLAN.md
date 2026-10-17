@@ -65,6 +65,10 @@ later; CRC per tick; mismatch → pause + resync. **LAN** = the relay run on the
 - **M5 advanced AI** (owner priority 2026-10-17): port the Remake's **Advanced AI**
   (`src/ai/newAI/**` — Eye/CityPlanner/CityBuilder/ArmyPlanner/…), not the classic AI and not a
   placeholder; mission-script AI settings (`!SET_AI_CHARACTER`/`DEFENSE`/`ATTACK`/…) honoured.
+- **M5d playable skirmish** (owner 2026-10-17 "finish it properly"): a command layer (every player action a
+  serializable command, the base of lockstep), a skirmish wrapper (human + Advanced AI hands, victory rule),
+  and a real game UI (setup screen, build menu, minimap, house/group panels, end screen). Spec
+  `docs/M5D-SPIKE.md`. Order: M5c -> M5d-A (sim) -> M5d-B (UI) -> M6.
 - **M6 multiplayer**: relay + lobby + lockstep + resync; two browsers finish one match. ("the
   Chrono Divide bar")
 - **M7 parity extras**: mission scripts/campaigns, replays, map editor, mods, mobile, quick match.

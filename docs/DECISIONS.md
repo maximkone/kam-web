@@ -2,7 +2,23 @@
 
 Newest first. Only decisions the lead/owner actually made, with evidence.
 
-## 2026-10-17 — M5 wave 2a: the Advanced AI's economy half runs (worker M)
+## 2026-10-17 - M5c accepted: the Advanced AI's military half (worker N)
+
+- Lead re-ran everything independently: `AI CHECK PASS (economy 30000 ticks, 843 events; attack 12000
+  ticks)` twice identical (economy sha `1a425dcd...`, attack sha `d1825fa9...`: kills 9, house damage 550,
+  one enemy store destroyed), `npm test` 125/125, `tsc` 0; WALK / ECON (`6d780b62`) / COMBAT (`09a19821`) /
+  BUILD (`98b80525`) / MAPSCAN (243, 0 anomalies) all unchanged.
+- The frozen economy sha moved `f62714ce...` -> `1a425dcd...` on purpose: the Supervisor's mine division
+  (gold-mine cap, iron reserve) is the faithful behaviour; switching it off reproduces the old sha exactly.
+  Accepted; the new numbers are frozen (record: `docs/M5-SPIKE.md` 7.5).
+- **Not done, blocks M5d:** the attack phase runs on scenario grants (kit, barracks, recruits, army). In the
+  organic economy run the AI never places its barracks (planner reserves it, builder never builds it) and
+  the school stalls on gold (store has 56, demand count 0). An AI that never raises an army is not an
+  opponent, so the next worker (N2) fixes both and proves an organic army without grants before M5d starts.
+- Simplifications kept (all in 7.5): no NavMesh, v0 defence lines, no group split, no soldier food,
+  warrior-count strength, army-vector orders not ported.
+
+## 2026-10-17 - M5 wave 2a: the Advanced AI's economy half runs (worker M)
 
 - `node tools/aisim/cli.ts --check` → `AI CHECK PASS` deterministic (sha `f62714ce…`): on
   `MapsMP/Battle Sun` the AI **plans and builds its own economy village** — sawmill, coal mine, farm,

@@ -79,7 +79,24 @@ import type { AnimLoop, UnitSpec } from '../assets/unitdat.ts';
 import type { HouseSpec } from '../assets/housedata.ts';
 import { housePlan } from '../assets/housedata.ts';
 import type { Mission } from '../mission/mission.ts';
-import { WARE_CNT, WT_TRUNK, WT_TIMBER, WT_STONE, WT_GOLD } from '../assets/wares.ts';
+import {
+  WARE_CNT,
+  WT_TRUNK,
+  WT_TIMBER,
+  WT_STONE,
+  WT_GOLD,
+  WT_AXE,
+  WT_WOODEN_SHIELD,
+  WT_LEATHER_ARMOR,
+  WT_IRON_SHIELD,
+  WT_IRON_ARMOR,
+  WT_SWORD,
+  WT_BOW,
+  WT_CROSSBOW,
+  WT_LANCE,
+  WT_PIKE,
+  WT_HORSE,
+} from '../assets/wares.ts';
 // M5a construction slice (docs/M5-SPIKE.md §1a/§2; construction.ts holds the plan stores).
 import type {
   BuildSite,
@@ -113,6 +130,7 @@ import {
   length,
   lengthSqr,
   createSoloGroup,
+  isWarriorSpec,
   spawnGroup as combatSpawnGroup,
   updateProjectiles,
   warriorCheckForEnemy,
@@ -375,8 +393,29 @@ function pointBelowEntrance(h: EconHouse): Pt {
   return { x: h.entrance.x, y: h.entrance.y + 1 };
 }
 
-/** The script id of htSchool (HOUSE_ID_TO_TYPE[13] = 19) — the school queue exception. */
+/** The script id of htSchool (HOUSE_ID_TO_TYPE[13] = 19) - the school queue exception. */
 const HOUSE_TYPE_SCHOOL = 13;
+/** The script id of htBarracks (ai.ts HT_BARRACKS) and the utRecruit unit record (ai.ts UT_RECRUIT). */
+const HOUSE_TYPE_BARRACKS = 21;
+const UNIT_RECRUIT = 13;
+/** TROOPS_TRAINED_CONDITION (KM_Defaults.pas 376): a barracks warrior starts at 0.6 of max condition. */
+const TROOPS_TRAINED_CONDITION = 0.6;
+
+/**
+ * TROOP_COST (KM_ResUnits.pas 168–177): the wares one warrior costs at a barracks, keyed by the
+ * unit.dat record (utMilitia 14 .. utKnight 22). Each listed ware is one unit of stock.
+ */
+export const TROOP_COST: Record<number, number[]> = {
+  14: [WT_AXE],
+  15: [WT_WOODEN_SHIELD, WT_LEATHER_ARMOR, WT_AXE],
+  16: [WT_IRON_SHIELD, WT_IRON_ARMOR, WT_SWORD],
+  17: [WT_LEATHER_ARMOR, WT_BOW],
+  18: [WT_IRON_ARMOR, WT_CROSSBOW],
+  19: [WT_LEATHER_ARMOR, WT_LANCE],
+  20: [WT_IRON_ARMOR, WT_PIKE],
+  21: [WT_WOODEN_SHIELD, WT_LEATHER_ARMOR, WT_AXE, WT_HORSE],
+  22: [WT_IRON_SHIELD, WT_IRON_ARMOR, WT_SWORD, WT_HORSE],
+};
 
 /**
  * The per-house runtime state. M5b: a school (script id 13) gets the queue of
@@ -3718,7 +3757,11 @@ export class EconomyWorld {
         // Put him in the school + go outside; the school completes the training (:107–114).
         // (TKMUnit.TrainInHouse only starts the task — the unit has no home yet; UnitTrained
         // registers builders in fConstructions / serfs in fDeliveries, KM_Hand.pas 553–563.)
-        this.goOut(u, st, school);
+        // M5c: a recruit goes to the owner's barracks and waits there (KM_HouseBarracks.pas 404–419:
+        // RecruitsAdd + Home = barracks); the v0 world moves it in directly (no walk to the door).
+        const barracks = u.type === UNIT_RECRUIT ? this.firstCompleteHouse(u.owner, HOUSE_TYPE_BARRACKS) : null;
+        if (barracks !== null) this.recruitEnterBarracks(u, st, barracks);
+        else this.goOut(u, st, school);
         this.schoolUnitTrainingComplete(school, sch);
         this.emit('school-unit-trained', `unit#${u.uid} type=${u.type}`);
         if (u.type === UNIT_BUILDER) C.addWorker(this.constructionState(u.owner), u.uid); // UnitTrained 553–565
@@ -4825,6 +4868,116 @@ export class EconomyWorld {
     const u = this.unitByUid(uid);
     if (u === null || u.groupUid === 0) return null;
     return this.groupByUid(u.groupUid);
+  }
+
+  // ---- M5c military world API (docs/M5-SPIKE.md 7.5; KM_HouseBarracks.pas 331–419) ------------
+
+  /** The first complete house of a script-id type owned by a hand (creation order). */
+  private firstCompleteHouse(owner: number, typeId: number): EconHouse | null {
+    for (const h of this.houses) {
+      if (h.owner === owner && h.typeId === typeId && !h.destroyed && h.buildState === 'done') return h;
+    }
+    return null;
+  }
+
+  /** A school recruit enters the barracks: Home = barracks, hidden inside (RecruitsAdd, 158–161). */
+  private recruitEnterBarracks(u: EconUnit, st: UnitState, h: EconHouse): void {
+    u.inside = true;
+    u.homeUid = h.uid;
+    st.homeUid = h.uid;
+    st.walk = null;
+    st.actionLock = 0;
+    st.locked = false;
+    u.action = 'stay';
+  }
+
+  /** CreateRecruitInside (KM_HouseBarracks.pas 404–419): a recruit waits hidden in the barracks (Home =
+   *  barracks). Used by the scenario grant of the attack run; school-trained recruits come the same way. */
+  barracksAddRecruit(houseUid: number): EconUnit | null {
+    const h = this.houseByUid(houseUid);
+    if (h === null || h.destroyed || h.typeId !== HOUSE_TYPE_BARRACKS) return null;
+    const door = pointBelowEntrance(h);
+    const u = this.spawnCitizen(h.owner, UNIT_RECRUIT, door.x, door.y, 6, h.uid);
+    const st = this.stateOf(u);
+    if (st !== undefined) this.recruitEnterBarracks(u, st, h);
+    return u;
+  }
+
+  /** The recruits waiting in one barracks (TKMHouseBarracks.RecruitsCount, KM_HouseBarracks.pas 164–167). */
+  barracksRecruitCount(houseUid: number): number {
+    let n = 0;
+    for (const u of this.units) if (u.homeUid === houseUid && u.type === UNIT_RECRUIT && u.inside && !u.dead) n += 1;
+    return n;
+  }
+
+  /** The wares of a hand that can be taken out of its houses now (stock, or the output slot). */
+  private handOutWareBalance(hand: number, ware: number): number {
+    let n = 0;
+    for (const h of this.houses) {
+      if (h.owner !== hand || h.destroyed) continue;
+      const st = this.houseState(h);
+      if (st.stock !== null) n += st.stock[ware] ?? 0;
+      else {
+        const slot = this.outSlot(h, ware);
+        if (slot >= 0) n += h.wareOut[slot];
+      }
+    }
+    return n;
+  }
+
+  /** Take one ware of a hand out of its first house that holds one, with the matching offer. */
+  private takeHouseOutWare(hand: number, ware: number): boolean {
+    for (const h of this.houses) {
+      if (h.owner !== hand || h.destroyed) continue;
+      if (!this.takeFromOut(h, ware)) continue;
+      const offer = this.offers[hand].find((o) => o.houseUid === h.uid && o.ware === ware && o.count > 0);
+      if (offer !== undefined) offer.count -= 1;
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * CanEquip (KM_HouseBarracks.pas 331–341). Simplified: the recruit count and the hand's stock
+   * stand in for the barracks' own ware slots (the v0 world has no WareOrder to the barracks), and
+   * Locks.GetUnitBlocked is not checked (no unit locks in v0).
+   */
+  barracksCanEquip(houseUid: number, unitType: number): boolean {
+    const h = this.houseByUid(houseUid);
+    const cost = TROOP_COST[unitType];
+    if (h === null || h.destroyed || h.buildState !== 'done' || h.typeId !== HOUSE_TYPE_BARRACKS || cost === undefined) return false;
+    if (this.barracksRecruitCount(houseUid) === 0) return false;
+    for (const ware of new Set(cost)) {
+      if (this.handOutWareBalance(h.owner, ware) < cost.filter((w) => w === ware).length) return false;
+    }
+    return true;
+  }
+
+  /**
+   * EquipWarrior (KM_HouseBarracks.pas 344–380): the wares are taken, the first recruit leaves, and
+   * a warrior at 0.6 max condition (TROOPS_TRAINED_CONDITION) stands at the barracks door. The
+   * Pascal walks him out with SetActionGoIn(gdGoOutside) and reports WarriorWalkedOut; the v0 world
+   * places him at the door at once (documented). Returns the new warrior, or null.
+   */
+  barracksEquip(houseUid: number, unitType: number): EconUnit | null {
+    if (!this.barracksCanEquip(houseUid, unitType)) return null;
+    const h = this.houseByUid(houseUid) as EconHouse;
+    for (const ware of TROOP_COST[unitType]) this.takeHouseOutWare(h.owner, ware);
+    const recruit = this.units.find((u) => u.homeUid === houseUid && u.type === UNIT_RECRUIT && u.inside && !u.dead);
+    if (recruit !== undefined) this.closeUnit(recruit);
+    const door = pointBelowEntrance(h);
+    const { unit } = this.spawnWarrior(h.owner, unitType, door.x, door.y, 4);
+    const ws = this.warriorState(unit);
+    if (ws !== null) ws.condition = Math.round(TROOPS_TRAINED_CONDITION * UNIT_MAX_CONDITION);
+    this.emit('barracks-equipped', `house#${h.uid} unit#${unit.uid} type=${unitType}`);
+    return unit;
+  }
+
+  /** The live warriors of a hand (GetArmyCount, KM_HandStats.pas): every warrior record. */
+  handWarriorCount(hand: number): number {
+    let n = 0;
+    for (const u of this.units) if (u.owner === hand && !u.dead && isWarriorSpec(this.unitSpecs[u.type])) n += 1;
+    return n;
   }
 }
 

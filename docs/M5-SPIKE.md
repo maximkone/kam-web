@@ -232,10 +232,88 @@ match on a real map.
 - External note: audit commit `80ac063` (by center) landed between the M5a commits and this one
   (`serve.ts` 400 on bad percent-encoding + ai tests wired into `package.json`); verified compatible.
 
-### 7.5 Worker N — the AI military half (next)
+### 7.5 Worker N — the AI military half (M5c): accepted (aisim attack phase; browser match open)
 
-ArmyManagement (recruit/equip via barracks, group state/food), ArmyAttackNew (combat groups,
-targets, pathing), ArmyDefence (defence positions incl. the classic scripted list), Supervisor
-(alliances, attack decisions, mine division) + the `!SET_AI_DEFENSE`/`!SET_AI_ATTACK` records.
-Acceptance: `aisim` gains an attack phase (the AI equips soldiers, forms groups, attacks a second
-hand; frozen kills/house damage + sha), then a browser match on a real map.
+Files: `packages/sim/aiarmy.ts` (ArmyManagement, ArmyAttackNew, ArmyDefence), `packages/sim/aisupervisor.ts`
+(Supervisor), `packages/sim/ai.ts` (`!SET_AI_DEFENSE`/`!SET_AI_ATTACK`/COPY/CLEAR/TROUP_PARAM/AUTO_DEFEND
+records, `AiPlayer.attachArmy`), `packages/sim/economy.ts` (additive barracks API: `barracksAddRecruit`,
+`barracksCanEquip`, `barracksEquip`, `barracksRecruitCount`, `handWarriorCount`; school recruits enter the
+barracks), `packages/sim/aiarmy.test.ts` (6 tests), `tools/aisim/cli.ts` (attack phase, `--scenario attack`),
+`tools/aisim/expected.ts` (attack numbers frozen).
+
+- `node tools/aisim/cli.ts --check` → `AI CHECK PASS (economy 30000 ticks, 843 events; attack 12000 ticks)`
+  (exit 0). Two runs identical: economy sha `1a425dcd44f3672a9d5b5059f0f8ca8b4f2ee4c15130d81737b013a63eb2fe0e`,
+  attack sha `d1825fa9985e904f3ac9c1281b5095a75f33b586518d7d18dcda4e6221cb7c59`.
+- **Attack phase** (`MapsMP/Battle Sun`, hand 1, 12000 ticks, the scenario grants below): equipped 12 (the AI's
+  RecruitSoldiers equips 12 warriors from the granted recruits), 63 warriors alive at the end; the Supervisor
+  issued 1 attack request (FFA, four teams); 5 groups joined the attack (combat groups max 5); kills by hand 1
+  **9**, kills by the enemies 3 (losses 3); house damage **550**; one enemy store destroyed (enemy houses 3→2);
+  enemy warriors 18→12.
+- **Economy numbers moved** (rule of 7.4 — explained): the frozen economy run is now `1a425dcd…` (was
+  `f62714ce…`). Cause: the Supervisor's DivideResources (mine division, KM_Supervisor.pas 1153–1238) runs in
+  every advanced-AI game and writes the predictor's `ironMineCnt`/`maxGoldMineCnt` (fields already wired:
+  the iron reserve and the gold-mine cap, KM_CityPredictor.pas 561, 796). Proof: the same run with the
+  division switched off (`--ticks 30000`) prints `sha256=f62714ce…`. Effect: the coal mine and the farm are no
+  longer planned, one inn is planned and built; events 789→843. The attack phase does not touch this run
+  (no barracks is equipped in the economy run). **The lead decides whether to keep the new economy numbers.**
+- `npm test` **125/125** (aiarmy.test.ts wired into `package.json`); `npx tsc --noEmit` exit 0.
+- Regressions: `WALK CHECK PASS`; `ECON CHECK PASS (6000 ticks)` sha `6d780b62…` unchanged; `COMBAT CHECK PASS`
+  sha `09a19821…` unchanged; `BUILD CHECK PASS` sha `98b80525…` unchanged; `MAPSCAN CHECK PASS (243 maps, 0 anomalies)`.
+
+**Attack-scenario grants** (`tools/aisim/cli.ts`, documented; they stand in for what the v0 world cannot yet
+make, the way the RMG kit does for the economy): hand 1 gets a military kit (40 axes, 40 wooden shields,
+40 leather armours in the store — no smithy in v0); a finished barracks on the first valid spot 4–12 tiles
+from the store (a map's SET_HOUSE would carry it); 12 recruits waiting in that barracks (the v0 school
+stalls, see open items); a start army of 6 full militia groups (54 militia) around the store (a map's
+SET_UNIT records would carry it; four groups is the minimum for an attack, and they must pass the draws);
+every other hand gets a 6-militia garrison beside its store.
+
+**Documented simplifications (M5c):**
+- No NavMesh: PlanPath keeps the Pascal's reach thresholds (AI_Par ATTACK_SQUAD) and walks straight at the
+  target; the group's tile router walks it. AvoidEnemyRoute/AvoidTrafficRoute, the navmesh defence lines
+  (FindTeamDefences) and the navmesh distances are not ported.
+- Defence positions: a v0 line generator (rings 4–14 around the city centre, reachable, 3 tiles apart, nearest
+  third to the enemy on line 0; count = round(troops/8)+5). The fixed `!SET_AI_DEFENSE` list (UpdateFixedDefences,
+  all on line 1) is ported as written.
+- No split: combat has no OrderSplitUnit/OrderSplitLinkTo, so linking moves whole members (up to 9) and a
+  group is placed whole.
+- Ranged groups do not reposition in formation (MoveRangedInFormation); they attack like melee.
+- No food: no OrderFood, FoodProblems is false. Soldiers never eat; condition 2700 falls by 1 every 10 ticks,
+  so unfed soldiers starve after roughly 16000–19000 ticks (the attack run ends at 12000).
+- Equip: `barracksEquip` takes the wares from the hand's stock (no barracks WareOrder in v0), skips the
+  Locks.GetUnitBlocked check, and places the warrior at the door at once (no WarriorWalkedOut walk);
+  WarriorEquipped runs in the same call.
+- The Supervisor: alliances are the v0 rule (same hand allies, else enemies), so each team is one hand;
+  CompareAllianceStrength is the warrior count (A−E)/(A+E), not the army-power model; the combat status matrix
+  (UpdateCombatStatus) and the army-vector clusters (UpdateAttacks, DivideForces, FindPositions, EvaluateEnemy)
+  are not ported; AttackNew targets come from the request's enemies (nearest house, TARGET_HOUSES first).
+- Mine division: one hand per team; the Pascal's unstable SortCustom is replaced by a stable sort (ties).
+- Scripted attacks (`!SET_AI_ATTACK`) hand the found target to the released groups; the Pascal's OrderAttack
+  drops it (see Pascal notes). Kills and losses are read from the combat sim's `unit-killed` events.
+
+**Pascal notes (kept as the source does them, not fixed):**
+1. KM_ArmyManagement.pas 484–512: the attack-request branch passes `TargetPoint`, which is never assigned;
+   OrderAttack ignores it anyway.
+2. KM_ArmyManagement.pas 462–471 + 342–387: `OrderAttack` calls `AddGroups(aAG.GroupArr)` with the whole array,
+   so the slots past the counted groups (written by the scan, not counted) are added too. Reproduced.
+3. KM_ArmyManagement.pas 404–414 (FilterGroups): after the swap, `Inc(MenCnt, GroupArr[ActIdx].Count)` adds
+   the displaced group's count, not the chosen group's. Reproduced.
+4. KM_ArmyAttackNew.pas 488–490: `StuckCounter` is capped at `ATTACK_SQUAD_TrafficDetection_Limit` (1) but
+   `StuckInTraffic` needs `> Threshold` (10), so it can never be set. Reproduced.
+5. KM_Supervisor.pas CompareAlliances: `DistCoef` (DISTANCE_COEF_1v1/FFA) is computed and never used in the
+   comparison. Not used here either.
+6. KM_Supervisor.pas UpdateState: the defence and attack windows share one modulo variable, so they are
+   exclusive in a tick (by design of the window offsets; copied).
+
+**Open items (found, not fixed — economy half and the v0 world):**
+- The barracks is reserved by the planner (`houseReservation` plan, placed=false) and never placed; the
+  planner's reserved count is what the city stats read, so `requiredHouses[barracks]` drops to 0 at the first
+  predictor update (warfare>0 is needed later). In the economy run no barracks is built. (Economy half: the
+  reserved plan needs the builder's placement path; not investigated further here.)
+- The school stalls: in the attack run the completed school stopped after 14 units (builders queued), its gold
+  stock is 0 while the store holds 56 gold, and its gold demand has count 0 at 60000 ticks (the second school is
+  still a WIP). So the v0 economy trains almost no recruits; the attack scenario therefore grants 12 recruits.
+- `recruitsTrained=0` in the frozen attack run is this stall, not the military code.
+
+**Not done:** the browser match against the AI on a real map (the spec's browser step; the aisim check is the
+acceptance here). The viewer does not show the army (groups, defence lines) yet.

@@ -1,27 +1,33 @@
-// cli.ts — M5b aisim: the Advanced AI's economy half on a real map (docs/M5-AI-NOTES.md §1–§3,
-// docs/M5-SPIKE.md §6 wave 2). An AI hand (default 1) of MapsMP/Cursed Land — the map's script
-// marks all four hands `!SET_ADVANCED_AI_PLAYER` — bootstraps like the game does
-// (gHands.AfterMissionInit → PlaceFirstStorehouse, KM_HandsCollection.pas 234–266) and then builds
-// its city: house plans, roads, fields, school training, ware management.
+// cli.ts — M5 aisim: the Advanced AI on a real map (docs/M5-AI-NOTES.md §1–§3, docs/M5-SPIKE.md §6 wave 2,
+// docs/M5-SPIKE.md 7.4 the economy half, 7.5 the military half). An AI hand (default 1) of MapsMP/Battle
+// Sun — the map's script marks all four hands `!SET_ADVANCED_AI_PLAYER` — bootstraps like the game does
+// (gHands.AfterMissionInit → PlaceFirstStorehouse, KM_HandsCollection.pas 234–266) and then runs its city
+// (house plans, roads, fields, school training, ware management) and its army (recruit/equip at the
+// barracks, combat groups, defence positions, the Supervisor's attack requests).
 // Usage:
-//   node tools/aisim/cli.ts --check        run TICKS, compare to expected.ts, AI CHECK PASS/FAIL
-//   node tools/aisim/cli.ts --ticks N      run N ticks, print the event log + summary
+//   node tools/aisim/cli.ts --check        the economy run (frozen, TICKS) then the attack run (ATTACK_TICKS);
+//                                          compares both to expected.ts; AI CHECK PASS/FAIL
+//   node tools/aisim/cli.ts --ticks N      run N ticks, print the event log + summary (economy scenario)
+//   node tools/aisim/cli.ts --scenario attack --ticks N   the attack scenario (military kit, enemy garrison)
 //   node tools/aisim/cli.ts --json         print the JSON summary
-//   node tools/aisim/cli.ts --map <kind>/<name>   pick another MapsMP map (default Cursed Land)
+//   node tools/aisim/cli.ts --map <kind>/<name>   pick another MapsMP map (default Battle Sun)
 //   node tools/aisim/cli.ts --hand N       the AI hand (default 1)
 //
 // Reads the map/mission/defines from the frozen r15472 install (read-only). Data paths can be
 // overridden with KAM_INSTALL and KAM_DATA (like the other tools).
 //
-// v0 scenario flags (documented, docs/M5-AI-NOTES.md §7):
-//  - Cursed Land's script has no SET_HOUSE/ADD_WARE, so the AI's store is placed by
-//    placeFirstStorehouse (the game path) and the scenario grants the RMG "Medium" starting kit
-//    (KM_RandomMapGenerator.pas 582–594: stone 100, timber 70, gold 80, wine 70, bread 50,
-//    sausage 30, fish 40 + 5 serfs, 4 builders) — a map-script start would carry the same wares
-//    via !ADD_WARE / the choose-loc kit. The v0 economy has no mine/quarry/farm production (only
-//    the hut and sawmill work, docs/M3-SPIKE.md), so the city stops growing once the kit runs out.
-//  - The AI update runs with `tick = world.tickCount + 1` BEFORE `world.tick()`, mirroring the
-//    game's gAIFields.UpdateState → gHands.UpdateState order (KM_Game.pas 3101–3114).
+// Scenario flags (documented):
+//  - The economy scenario (worker M): hand 1 of Battle Sun, the map's store and !ADD_WARE start, the
+//    AI's economy half for TICKS ticks. Battle Sun's script sets AUTO_ATTACK and AUTO_DEFEND for all hands,
+//    so the military half is live in this run too (no barracks is built within TICKS, so no soldier is made).
+//  - The attack scenario (worker N): the same hand with a military kit (40 axes, 40 wooden shields, 40
+//    leather armours in the store — the economy has no smithy, so this stands in for the weapon production)
+//    and hand 2 (the enemy) with a 6-militia garrison beside its store. The Supervisor decides the attack
+//    from the warrior counts; the army equips at the barracks, forms the groups and attacks hand 2.
+//  - Cursed Land / RMG-style starts keep the Medium kit (KM_RandomMapGenerator.pas 582–594) and a
+//    placeFirstStorehouse store — the economy scenario of earlier waves; Battle Sun has !ADD_WARE.
+//  - The AI update runs with `tick = world.tickCount + 1` BEFORE `world.tick()`, mirroring the game's
+//    gAIFields.UpdateState → gHands.UpdateState order (KM_Game.pas 3101–3114): the Supervisor first.
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { parseMapFile } from '../../packages/map/map.ts';
@@ -31,23 +37,31 @@ import { parseUnitDat, parseSerfCarry } from '../../packages/assets/unitdat.ts';
 import { parseHousesDat } from '../../packages/assets/housedata.ts';
 import { parseMissionScript, parseMissionInfo } from '../../packages/mission/mission.ts';
 import { createEconomyWorld } from '../../packages/sim/economy.ts';
-import type { EconomyWorld, SimEvent } from '../../packages/sim/economy.ts';
-import { WARE_CNT, WARE_NAMES } from '../../packages/assets/wares.ts';
+import type { EconHouse, EconomyWorld, SimEvent } from '../../packages/sim/economy.ts';
+import { WARE_CNT, WARE_NAMES, WT_AXE, WT_WOODEN_SHIELD, WT_LEATHER_ARMOR } from '../../packages/assets/wares.ts';
 import {
   AiPlayer,
   Eye,
   Influences,
   UT_BUILDER,
+  UT_MILITIA,
+  UT_RECRUIT,
   UT_SERF,
+  HT_BARRACKS,
   HT_STORE,
   applyMissionHouseUnlocks,
   parseAiSetups,
   placeFirstStorehouse,
 } from '../../packages/sim/ai.ts';
-import { TICKS, EXPECTED } from './expected.ts';
+import { ArmyManagement } from '../../packages/sim/aiarmy.ts';
+import { AiSupervisor } from '../../packages/sim/aisupervisor.ts';
+import { TICKS, ATTACK_TICKS, EXPECTED, EXPECTED_ATTACK } from './expected.ts';
 
 const INSTALL = process.env.KAM_INSTALL ?? 'C:/Users/me/Desktop/KaM Remake/KaM Remake Beta r15472';
 const DEFINES_DIR = process.env.KAM_DATA ?? `${INSTALL}/data/defines`;
+
+/** economy: the frozen economy run (worker M's scenario); attack: the military run (worker N, 7.5). */
+type Scenario = 'economy' | 'attack';
 
 interface Options {
   check: boolean;
@@ -55,22 +69,24 @@ interface Options {
   json: boolean;
   map: string; // <kind>/<name>
   hand: number;
+  scenario: Scenario;
 }
 
 function usage(): string {
   return (
-    'usage: node tools/aisim/cli.ts --check        (run ' +
-    `${TICKS} ticks, compare to expected.ts, AI CHECK PASS/FAIL)\n` +
+    'usage: node tools/aisim/cli.ts --check        (economy ' +
+    `${TICKS} ticks + attack ${ATTACK_TICKS} ticks, compare to expected.ts, AI CHECK PASS/FAIL)\n` +
     '       node tools/aisim/cli.ts --ticks N      (run N ticks, event log + summary)\n' +
+    '       node tools/aisim/cli.ts --scenario economy|attack  (default economy)\n' +
     '       node tools/aisim/cli.ts --json         (JSON summary)\n' +
-    '       node tools/aisim/cli.ts --map <kind>/<name>  (default MapsMP/Cursed Land)\n' +
+    '       node tools/aisim/cli.ts --map <kind>/<name>  (default MapsMP/Battle Sun)\n' +
     '       node tools/aisim/cli.ts --hand N       (the AI hand, default 1)\n' +
     'env: KAM_INSTALL, KAM_DATA (defines dir)'
   );
 }
 
 function parseArgs(argv: string[]): Options {
-  const opts: Options = { check: false, ticks: null, json: false, map: 'MapsMP/Battle Sun', hand: 1 };
+  const opts: Options = { check: false, ticks: null, json: false, map: 'MapsMP/Battle Sun', hand: 1, scenario: 'economy' };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === '--check') opts.check = true;
@@ -82,6 +98,11 @@ function parseArgs(argv: string[]): Options {
     } else if (arg === '--json') opts.json = true;
     else if (arg === '--map') {
       opts.map = argv[i + 1];
+      i += 1;
+    } else if (arg === '--scenario') {
+      const s = argv[i + 1];
+      if (s !== 'economy' && s !== 'attack') throw new Error(`--scenario needs economy or attack, got "${s}"`);
+      opts.scenario = s;
       i += 1;
     } else if (arg === '--hand') {
       const n = Number(argv[i + 1]);
@@ -124,15 +145,18 @@ interface Sim {
   world: EconomyWorld;
   eye: Eye;
   ai: AiPlayer;
+  army: ArmyManagement;
+  supervisor: AiSupervisor;
   setup: SetupSummary;
   summary: LoadSummary;
 }
 
-/** The economy-half setup values the AI honoured (docs/M5-AI-NOTES.md §5). */
+/** The AI setup values the AI honoured (docs/M5-AI-NOTES.md §5). */
 interface SetupSummary {
   newAI: boolean;
   autoBuild: boolean;
   autoAttack: boolean;
+  autoDefend: boolean;
   armyType: number;
   equipRateIron: number;
   equipRateLeather: number;
@@ -157,7 +181,89 @@ const KIT_WARES: [number, number][] = [
 const KIT_SERFS = 5;
 const KIT_BUILDERS = 4;
 
-function buildSim(opts: Options): Sim {
+/** The attack scenario's enemies: every other hand, each with a militia garrison beside its store. */
+const ENEMY_GARRISON = 6;
+/** The attack scenario's starting army of the AI hand: six full groups (MIN_GROUPS_IN_ATTACK = 4 groups
+ *  must pass the mobilization draws, so four would rarely be enough). */
+const START_GROUPS = 6;
+const START_GROUP_SIZE = 9;
+/** Recruits waiting in the barracks at the start (see docs/M5-SPIKE.md 7.5: the v0 school stalls on gold). */
+const START_RECRUITS = 12;
+/** The attack scenario's military kit (documented v0 grant: the economy has no smithy, so the weapons
+ *  and armour of the barracks come from the start stock, as the RMG kit does for the economy). */
+const MILITARY_KIT: [number, number][] = [
+  [WT_AXE, 40],
+  [WT_WOODEN_SHIELD, 40],
+  [WT_LEATHER_ARMOR, 40],
+];
+
+/**
+ * A finished barracks for the hand, placed by the economy's own rule (canPlaceHouse on the entrance)
+ * on the first free spot 4–12 tiles from the store. The map's start would carry it as a SET_HOUSE; the
+ * v0 economy does not build the AI's reserved barracks (docs/M5-SPIKE.md 7.5, open items).
+ */
+function grantBarracks(world: EconomyWorld, hand: number): EconHouse {
+  const store = world.findFirstHouse(HT_STORE, hand);
+  const spec = world.houseSpecOf(HT_BARRACKS);
+  if (store === null || spec === undefined) throw new Error('attack scenario: no store or barracks spec');
+  for (let r = 4; r <= 12; r++) {
+    for (let dy = -r; dy <= r; dy++) {
+      for (let dx = -r; dx <= r; dx++) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+        const x = store.x + dx;
+        const y = store.y + dy;
+        if (!world.canPlaceHouse(HT_BARRACKS, x + spec.entranceDx, y)) continue;
+        const house = world.spawnHouse(HT_BARRACKS, x, y, hand);
+        world.houseCreatedFor(hand, HT_BARRACKS);
+        return house;
+      }
+    }
+  }
+  throw new Error(`attack scenario: no barracks spot near the store of hand ${hand}`);
+}
+
+/**
+ * The attack scenario's starting army: full militia groups around the store, as a map's !SET_UNIT
+ * records would place them (the v0 economy trains soldiers too slowly to reach the Pascal's
+ * four-group attack threshold on its own, see docs/M5-SPIKE.md 7.5).
+ */
+function addStartArmy(world: EconomyWorld, hand: number, groups: number, perGroup: number): void {
+  const store = world.findFirstHouse(HT_STORE, hand);
+  if (store === null) throw new Error(`attack scenario: hand ${hand} has no store`);
+  let placed = 0;
+  for (let r = 5; r <= 14 && placed < groups; r++) {
+    for (let dy = -r; dy <= r && placed < groups; dy += 3) {
+      for (let dx = -r; dx <= r && placed < groups; dx += 3) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+        const x = store.entrance.x + dx;
+        const y = store.entrance.y + dy;
+        if (!world.tileInMapCoords(x, y) || !world.tileWalkable(x, y) || world.houseAt(x, y) !== null || world.isRoadTile(x, y)) continue;
+        const g = world.spawnGroup(hand, UT_MILITIA, x, y, 4, 3, perGroup);
+        if (g.memberUids.length > 0) placed += 1;
+      }
+    }
+  }
+  if (placed < groups) throw new Error(`attack scenario: only ${placed} of ${groups} start groups fit around the store`);
+}
+
+/** The garrison of the enemy hand: militia a few tiles south of its store. */
+function addEnemyGarrison(world: EconomyWorld, enemy: number): void {
+  if (enemy >= world.handCount) throw new Error(`attack scenario: the map has no hand ${enemy}`);
+  const store = world.findFirstHouse(HT_STORE, enemy);
+  if (store === null) throw new Error(`attack scenario: hand ${enemy} has no store`);
+  for (let dy = 3; dy <= 8; dy++) {
+    for (let dx = -3; dx <= 3; dx++) {
+      const x = store.entrance.x + dx;
+      const y = store.entrance.y + dy;
+      if (!world.tileInMapCoords(x, y) || !world.tileWalkable(x, y) || world.houseAt(x, y) !== null || world.isRoadTile(x, y)) continue;
+      world.spawnGroup(enemy, UT_MILITIA, x, y, 4, 3, ENEMY_GARRISON);
+      return;
+    }
+  }
+  throw new Error(`attack scenario: no garrison spot near the store of hand ${enemy}`);
+}
+
+function buildSim(opts: Options, scenario: Scenario): Sim {
   const at = opts.map.indexOf('/');
   if (at <= 0) throw new Error(`--map wants <kind>/<name>, got "${opts.map}"`);
   const kind = opts.map.slice(0, at);
@@ -214,8 +320,20 @@ function buildSim(opts: Options): Sim {
       world.registerBuilder(opts.hand, u.uid);
     }
   }
+  if (scenario === 'attack') {
+    for (const [ware, amount] of MILITARY_KIT) world.addWareToStore(opts.hand, ware, amount);
+    const barracks = grantBarracks(world, opts.hand);
+    for (let i = 0; i < START_RECRUITS; i++) world.barracksAddRecruit(barracks.uid);
+    addStartArmy(world, opts.hand, START_GROUPS, START_GROUP_SIZE);
+    for (let h = 0; h < world.handCount; h++) if (h !== opts.hand) addEnemyGarrison(world, h);
+  }
 
   const ai = new AiPlayer(world, influences, eye, setup);
+  const army = new ArmyManagement(world, ai);
+  ai.attachArmy(army);
+  // gAIFields.AfterMissionInit (the Supervisor) runs before the hands' AfterMissionInit (KM_HandsCollection.pas 259–266).
+  const supervisor = new AiSupervisor(world, eye, influences, [ai]);
+  supervisor.afterMissionInit();
   ai.afterMissionInit();
 
   const advanced = info.advancedAI.map((v, i) => (v ? i : -1)).filter((i) => i >= 0).join(',');
@@ -235,6 +353,7 @@ function buildSim(opts: Options): Sim {
     newAI: setup.newAI,
     autoBuild: setup.autoBuild,
     autoAttack: setup.autoAttack,
+    autoDefend: setup.autoDefend,
     armyType: setup.armyType,
     equipRateIron: setup.equipRateIron,
     equipRateLeather: setup.equipRateLeather,
@@ -245,7 +364,18 @@ function buildSim(opts: Options): Sim {
     startPosition: `${setup.startPosition.x},${setup.startPosition.y}`,
     centerScreen: setup.centerScreen.x !== 0 ? `${setup.centerScreen.x},${setup.centerScreen.y}` : '-',
   };
-  return { world, eye, ai, setup: setupSummary, summary };
+  return { world, eye, ai, army, supervisor, setup: setupSummary, summary };
+}
+
+/** One tick of the game order: gAIFields (the Supervisor) → gHands (the AI) → the world (KM_Game.pas 3101–3114). */
+function advance(sim: Sim, ticks: number, onTick?: (tick: number) => void): void {
+  for (let i = 0; i < ticks; i++) {
+    const tick = sim.world.tickCount + 1;
+    sim.supervisor.updateState(tick);
+    sim.ai.updateState(tick);
+    sim.world.tick();
+    if (onTick !== undefined) onTick(tick);
+  }
 }
 
 function eventTotals(events: SimEvent[]): Record<string, number> {
@@ -308,7 +438,6 @@ function finalCounts(sim: Sim): FinalCounts {
     else wipHouses += 1;
   }
   const unitsByType: Record<string, number> = {};
-  let workers = 0;
   let serfs = 0;
   let builders = 0;
   for (const u of world.units) {
@@ -317,7 +446,7 @@ function finalCounts(sim: Sim): FinalCounts {
     if (u.type === UT_SERF) serfs += 1;
     if (u.type === UT_BUILDER) builders += 1;
   }
-  workers = builders;
+  const workers = builders;
   let cornFields = 0;
   for (let y = 1; y <= world.mapY - 1; y++) {
     for (let x = 1; x <= world.mapX - 1; x++) {
@@ -360,8 +489,40 @@ function finalCounts(sim: Sim): FinalCounts {
   };
 }
 
+/** The military part of the canonical state (attack scenario only; keys are added after the economy's). */
+function armyCanonical(sim: Sim): Record<string, unknown> {
+  const { world, army } = sim;
+  const groups = world.groupList().map((g) => ({
+    uid: g.uid,
+    owner: g.owner,
+    type: g.groupType,
+    members: g.memberUids.slice(),
+    order: g.order,
+    orderXY: [g.orderX, g.orderY],
+    targets: [g.targetUid, g.targetHouseUid],
+  }));
+  const combat = army.attack.cgs.map((c) => ({
+    g: c.groupUid,
+    t: c.targetType,
+    p: c.phase,
+    house: c.targetHouseUid,
+    unit: c.targetUnitUid,
+    group: c.targetGroupUid,
+    pos: c.targetPos,
+  }));
+  const defence = army.defence.positions.map((p) => [p.loc.x, p.loc.y, p.dir, p.weight, p.line, p.groupUid]);
+  const ar = army.attackRequest;
+  return {
+    groups,
+    combat,
+    defence,
+    request: [ar.active, ar.ffa, ar.bestEnemy, ar.enemies],
+    houseDamage: world.houseDamageTotal,
+  };
+}
+
 /** A canonical, order-stable serialization of the observable world + AI state, sha256'd. */
-function stateSha(sim: Sim): string {
+function stateSha(sim: Sim, attack = false): string {
   const { world, ai } = sim;
   const hand = sim.summary.hand;
   const houses = world.houses.map((h) => ({
@@ -417,6 +578,7 @@ function stateSha(sim: Sim): string {
     road,
     workerCount: ai.predictor.workerCount,
     required: ai.predictor.requiredHouses,
+    ...(attack ? armyCanonical(sim) : {}),
   });
   return createHash('sha256').update(canonical).digest('hex');
 }
@@ -427,76 +589,211 @@ function compare(label: string, actual: unknown, expected: unknown, problems: st
   if (a !== b) problems.push(`${label}: ${a} != expected ${b}`);
 }
 
-function main(): void {
-  const opts = parseArgs(process.argv.slice(2));
-  if (!opts.check && opts.ticks === null && !opts.json) {
-    console.log(usage());
-    return;
-  }
-  const sim = buildSim(opts);
-  const { world, ai, summary, setup } = sim;
+/** The economy run (worker M's frozen check, unchanged scenario). */
+function economyRun(opts: Options, ticks: number): { sim: Sim; elapsed: number } {
+  const sim = buildSim(opts, 'economy');
+  const { summary, setup } = sim;
   console.log(
     `AISIM ${summary.map} ${summary.mapSize} hand=${summary.hand} advanced=[${summary.advanced}] hands=${summary.hands} ` +
       `houses=${summary.houses} streets=${summary.streets} units=${summary.units} store=${summary.store}`,
   );
   console.log(`AISIM kit: ${summary.kit} + ${KIT_SERFS} serfs + ${KIT_BUILDERS} builders`);
   console.log(
-    `AISIM setup: newAI=${setup.newAI} AutoBuild=${setup.autoBuild} AutoAttack=${setup.autoAttack} ArmyType=${setup.armyType} ` +
+    `AISIM setup: newAI=${setup.newAI} AutoBuild=${setup.autoBuild} AutoAttack=${setup.autoAttack} AutoDefend=${setup.autoDefend} ArmyType=${setup.armyType} ` +
       `EquipIron=${setup.equipRateIron} EquipLeather=${setup.equipRateLeather} MaxSoldiers=${setup.maxSoldiers} ` +
       `RecruitDelay=${setup.recruitDelay} UnlimitedEquip=${setup.unlimitedEquip} RepairAlways=${setup.repairAlways} ` +
       `StartPos=(${setup.startPosition}) CenterScreen=(${setup.centerScreen})`,
   );
-
-  const ticks = opts.check || (opts.json && opts.ticks === null) ? TICKS : opts.ticks ?? 0;
   const start = Date.now();
-  for (let i = 0; i < ticks; i++) {
-    // The game order: the AI sees the state at the end of tick N, then tick N+1 runs.
-    ai.updateState(world.tickCount + 1);
-    world.tick();
-  }
-  const elapsed = Date.now() - start;
+  advance(sim, ticks);
+  return { sim, elapsed: Date.now() - start };
+}
 
-  const totals = eventTotals(world.events);
+interface AttackFinals {
+  ticks: number;
+  hand: number;
+  equipped: number;
+  recruitsTrained: number;
+  warriors: number;
+  requests: number;
+  combatGroupsMax: number;
+  groupsAddedToAttack: number;
+  combatGroupsEnd: number;
+  killsByHand: number;
+  killsByEnemy: number;
+  lossesByEnemy: number;
+  houseDamage: number;
+  houseDestroyedEvents: number;
+  enemyHousesStart: number;
+  enemyHousesEnd: number;
+  enemyWarriorsStart: number;
+  enemyWarriorsEnd: number;
+  rngState: number;
+}
+
+/** The units of other hands that `attacker` killed (the combat sim's `unit-killed` events, from=attacker). */
+function killsBy(events: SimEvent[], attacker: number): number {
+  let n = 0;
+  for (const e of events) {
+    const m = /^unit-killed unit#\d+ owner=(-?\d+) from=(-?\d+)$/.exec(e.text);
+    if (m !== null && Number(m[2]) === attacker && Number(m[1]) !== attacker) n += 1;
+  }
+  return n;
+}
+
+/** The units of `hand` that other hands killed. */
+function lossesTo(events: SimEvent[], hand: number): number {
+  let n = 0;
+  for (const e of events) {
+    const m = /^unit-killed unit#\d+ owner=(-?\d+) from=(-?\d+)$/.exec(e.text);
+    if (m !== null && Number(m[1]) === hand && Number(m[2]) >= 0 && Number(m[2]) !== hand) n += 1;
+  }
+  return n;
+}
+
+/** The attack run (worker N's military check): the economy plus the army against the enemy store. */
+function attackRun(opts: Options, ticks: number): { sim: Sim; finals: AttackFinals; elapsed: number } {
+  const sim = buildSim(opts, 'attack');
+  const { world, army } = sim;
+  const hand = sim.summary.hand;
+  const enemies = Array.from({ length: world.handCount }, (_, h) => h).filter((h) => h !== hand);
+  const enemyHouses = (): number => world.houses.filter((h) => h.owner !== hand && h.owner >= 0 && !h.destroyed).length;
+  const enemyWarriors = (): number => enemies.reduce((s, h) => s + world.handWarriorCount(h), 0);
+  const enemyStart = enemyHouses();
+  const enemyWarriorsStart = enemyWarriors();
+  let prevRequest: unknown = army.attackRequest;
+  let requests = 0;
+  let prevCount = 0;
+  let adds = 0;
+  let combatMax = 0;
+  const start = Date.now();
+  advance(sim, ticks, () => {
+    if (army.attackRequest !== prevRequest) {
+      if (army.attackRequest.active) requests += 1;
+      prevRequest = army.attackRequest;
+    }
+    const c = army.attack.count;
+    if (c > prevCount) adds += c - prevCount;
+    prevCount = c;
+    combatMax = Math.max(combatMax, c);
+  });
+  const elapsed = Date.now() - start;
+  const finals: AttackFinals = {
+    ticks: world.tickCount,
+    hand,
+    equipped: world.events.filter((e) => e.text.startsWith('barracks-equipped ')).length,
+    recruitsTrained: world.events.filter((e) => e.text.startsWith('school-unit-trained ') && e.text.endsWith(` type=${UT_RECRUIT}`)).length,
+    warriors: world.handWarriorCount(hand),
+    requests,
+    combatGroupsMax: combatMax,
+    groupsAddedToAttack: adds,
+    combatGroupsEnd: army.attack.count,
+    killsByHand: killsBy(world.events, hand),
+    killsByEnemy: enemies.reduce((s, h) => s + killsBy(world.events, h), 0),
+    lossesByEnemy: lossesTo(world.events, hand),
+    houseDamage: world.houseDamageTotal,
+    houseDestroyedEvents: world.events.filter((e) => e.text.startsWith('house-destroyed ')).length,
+    enemyHousesStart: enemyStart,
+    enemyHousesEnd: enemyHouses(),
+    enemyWarriorsStart,
+    enemyWarriorsEnd: enemyWarriors(),
+    rngState: world.rngState,
+  };
+  return { sim, finals, elapsed };
+}
+
+function printAttack(sim: Sim, finals: AttackFinals, sha: string): void {
+  console.log(
+    `ATTACK equipped=${finals.equipped} recruitsTrained=${finals.recruitsTrained} warriors(hand${finals.hand})=${finals.warriors} ` +
+      `requests=${finals.requests} combatGroupsMax=${finals.combatGroupsMax} groupsAddedToAttack=${finals.groupsAddedToAttack} ` +
+      `combatGroupsEnd=${finals.combatGroupsEnd}`,
+  );
+  console.log(
+    `ATTACK kills(by hand${finals.hand})=${finals.killsByHand} kills(by enemies)=${finals.killsByEnemy} losses=${finals.lossesByEnemy} ` +
+      `houseDamage=${finals.houseDamage} houseDestroyed=${finals.houseDestroyedEvents} ` +
+      `enemyHouses=${finals.enemyHousesStart}->${finals.enemyHousesEnd} enemyWarriors=${finals.enemyWarriorsStart}->${finals.enemyWarriorsEnd} ` +
+      `rngState=${finals.rngState}`,
+  );
+  console.log(`ATTACK SHA256 ${sha} (units=${sim.world.units.length} groups=${sim.world.groupList().length})`);
+}
+
+function main(): void {
+  const opts = parseArgs(process.argv.slice(2));
+  if (!opts.check && opts.ticks === null && !opts.json && opts.scenario === 'economy') {
+    console.log(usage());
+    return;
+  }
+
+  if (opts.check) {
+    const problems: string[] = [];
+    const eco = economyRun(opts, TICKS);
+    const { sim } = eco;
+    const summary = sim.summary;
+    console.log(`EVENTS ${Object.entries(eventTotals(sim.world.events)).map(([k, v]) => `${k}=${v}`).join(' ')}`);
+    const finals = finalCounts(sim);
+    console.log(
+      `FINAL planned=${JSON.stringify(finals.plannedByType)} placed=${finals.plannedPlaced} reserved=${finals.plannedReserved} ` +
+        `built=${JSON.stringify(finals.builtByType)} completed=${finals.completedHouses} wip=${finals.wipHouses} ` +
+        `roadTiles=${finals.roadTiles} roadBuilt=${finals.roadBuiltEvents} corn=${finals.cornFields} fieldBuilt=${finals.fieldBuiltEvents} ` +
+        `digged=${finals.housePlansDigged} activated=${finals.housesActivated} units=${JSON.stringify(finals.unitsByType)} ` +
+        `trained=${finals.trainedUnits} queued=${finals.schoolQueued} workers=${finals.builders} serfs=${finals.serfs} ` +
+        `wares=${JSON.stringify(finals.wares)} workerCount=${finals.workerCount} reqSchool=${finals.requiredSchool} ` +
+        `cityCompleted=${finals.cityCompleted} rngState=${finals.rngState}`,
+    );
+    const sha = stateSha(sim);
+    console.log(`SHA256 ${sha}`);
+    compare('load', summary, EXPECTED.load, problems);
+    compare('events', eventTotals(sim.world.events), EXPECTED.events, problems);
+    compare('final', finals, EXPECTED.final, problems);
+    compare('sha256', sha, EXPECTED.sha256, problems);
+    console.log(`AI ECON CHECK ${problems.length === 0 ? 'PASS' : 'FAIL'} (${sim.world.tickCount} ticks, ${sim.world.events.length} events, ${eco.elapsed} ms)`);
+
+    const attackProblems: string[] = [];
+    const run = attackRun(opts, ATTACK_TICKS);
+    const attackSha = stateSha(run.sim, true);
+    printAttack(run.sim, run.finals, attackSha);
+    compare('attack', run.finals, EXPECTED_ATTACK.final, attackProblems);
+    compare('attack sha256', attackSha, EXPECTED_ATTACK.sha256, attackProblems);
+    console.log(`AI ATTACK CHECK ${attackProblems.length === 0 ? 'PASS' : 'FAIL'} (${run.finals.ticks} ticks, ${run.elapsed} ms)`);
+
+    const all = [...problems.map((p) => `econ ${p}`), ...attackProblems.map((p) => `attack ${p}`)];
+    if (all.length === 0) {
+      console.log(`AI CHECK PASS (economy ${sim.world.tickCount} ticks, ${sim.world.events.length} events; attack ${run.finals.ticks} ticks)`);
+    } else {
+      console.log(`AI CHECK FAIL:\n  ${all.join('\n  ')}`);
+      process.exitCode = 1;
+    }
+    return;
+  }
+
+  if (opts.scenario === 'attack') {
+    const ticks = opts.ticks ?? ATTACK_TICKS;
+    const run = attackRun(opts, ticks);
+    if (opts.json) {
+      console.log(JSON.stringify({ final: run.finals, sha256: stateSha(run.sim, true), elapsedMs: run.elapsed }, null, 2));
+      return;
+    }
+    printAttack(run.sim, run.finals, stateSha(run.sim, true));
+    return;
+  }
+
+  const ticks = opts.json && opts.ticks === null ? TICKS : opts.ticks ?? 0;
+  const eco = economyRun(opts, ticks);
+  const { sim, elapsed } = eco;
+  const totals = eventTotals(sim.world.events);
   const finals = finalCounts(sim);
   const sha = stateSha(sim);
 
   if (opts.json) {
-    console.log(JSON.stringify({ load: summary, setup, ticks: world.tickCount, events: totals, final: finals, sha256: sha, elapsedMs: elapsed }, null, 2));
+    console.log(JSON.stringify({ load: sim.summary, setup: sim.setup, ticks: sim.world.tickCount, events: totals, final: finals, sha256: sha, elapsedMs: elapsed }, null, 2));
     return;
   }
-  if (opts.ticks !== null && !opts.check) {
-    for (const e of world.events) console.log(`EVENT t=${e.tick} ${e.text}`);
-    console.log(
-      `TICKS ${world.tickCount} events=${world.events.length} planned=${JSON.stringify(finals.plannedByType)} built=${JSON.stringify(finals.builtByType)} ` +
-        `completed=${finals.completedHouses} roadTiles=${finals.roadTiles} corn=${finals.cornFields} trained=${finals.trainedUnits} ` +
-        `rngState=${world.rngState} sha256=${sha}`,
-    );
-    return;
-  }
-
-  console.log(`EVENTS ${Object.entries(totals).map(([k, v]) => `${k}=${v}`).join(' ')}`);
+  for (const e of sim.world.events) console.log(`EVENT t=${e.tick} ${e.text}`);
   console.log(
-    `FINAL planned=${JSON.stringify(finals.plannedByType)} placed=${finals.plannedPlaced} reserved=${finals.plannedReserved} ` +
-      `built=${JSON.stringify(finals.builtByType)} completed=${finals.completedHouses} wip=${finals.wipHouses} ` +
-      `roadTiles=${finals.roadTiles} roadBuilt=${finals.roadBuiltEvents} corn=${finals.cornFields} fieldBuilt=${finals.fieldBuiltEvents} ` +
-      `digged=${finals.housePlansDigged} activated=${finals.housesActivated} units=${JSON.stringify(finals.unitsByType)} ` +
-      `trained=${finals.trainedUnits} queued=${finals.schoolQueued} workers=${finals.builders} serfs=${finals.serfs} ` +
-      `wares=${JSON.stringify(finals.wares)} workerCount=${finals.workerCount} reqSchool=${finals.requiredSchool} ` +
-      `cityCompleted=${finals.cityCompleted} rngState=${finals.rngState}`,
+    `TICKS ${sim.world.tickCount} events=${sim.world.events.length} planned=${JSON.stringify(finals.plannedByType)} built=${JSON.stringify(finals.builtByType)} ` +
+      `completed=${finals.completedHouses} roadTiles=${finals.roadTiles} corn=${finals.cornFields} trained=${finals.trainedUnits} ` +
+      `rngState=${sim.world.rngState} sha256=${sha}`,
   );
-  console.log(`SHA256 ${sha}`);
-
-  const problems: string[] = [];
-  compare('load', summary, EXPECTED.load, problems);
-  compare('events', totals, EXPECTED.events, problems);
-  compare('final', finals, EXPECTED.final, problems);
-  compare('sha256', sha, EXPECTED.sha256, problems);
-  if (problems.length === 0) {
-    console.log(`AI CHECK PASS (${world.tickCount} ticks, ${world.events.length} events, ${elapsed} ms)`);
-  } else {
-    console.log(`AI CHECK FAIL:\n  ${problems.join('\n  ')}`);
-    process.exitCode = 1;
-  }
 }
 
 try {
