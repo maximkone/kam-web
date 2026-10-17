@@ -565,6 +565,8 @@ let hoverX = -1; // 1-based tile under the cursor, -1 = none
 let hoverY = -1;
 let acc = 0;          // tick accumulator, ms
 let lastFrame = 0;
+/** True once a game shell attached its own skirmish world: the shell then owns the sim stepping (frame() only renders). */
+let externalSim = false;
 let flashTimer = 0;
 
 // ---- data helpers -----------------------------------------------------------
@@ -3095,7 +3097,7 @@ function frame(now: number): void {
   try {
     acc += now - lastFrame;
     lastFrame = now;
-    if (world !== null) {
+    if (world !== null && !externalSim) {
       let steps = 0;
       while (acc >= TICK_MS && steps < MAX_CATCHUP) {
         stepWorld();
@@ -3622,6 +3624,8 @@ function installHook(): void {
       hoverX = -1;
       hoverY = -1;
     },
+    /** Centre the camera on a hand's houses (the game shell calls this after attachWorld). */
+    jumpToVillage: (owner: number) => jumpToVillage(owner),
     speedOf: (uid: number) => {
       const u = activeUnits().find((v) => v.uid === uid);
       return u === undefined ? null : speedsFor(u.type);
@@ -3961,6 +3965,21 @@ function installHook(): void {
     refreshRoads: () => {
       lastRoadTileCount = -1;
       return true;
+    },
+    /** Attach an external economy world and KaMap (the B1 game shell hook). */
+    attachWorld: (w: EconomyWorld, km: KaMap, hand?: number) => {
+      world = w;
+      currentKaMap = km;
+      if (map === null || km.mapX !== map.mapX || km.mapY !== map.mapY) {
+        map = { file: km.file, mapX: km.mapX, mapY: km.mapY };
+        tiles = km.tiles;
+        baseTerrain = km.baseTerrain ?? null;
+      }
+      if (typeof hand === 'number') fowHand = hand;
+      externalSim = true; // the game shell steps the skirmish (commands, AI, victory); this renderer must not step it too
+      buildMode = 'none';
+      finishLoad();
+      updateHud();
     },
   };
   (window as unknown as Record<string, unknown>).__kamplay = hook;

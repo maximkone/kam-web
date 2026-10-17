@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kam-web — skirmish vs Advanced AI</title>
+<style>
+html, body { margin: 0; height: 100%; overflow: hidden; background: #202830; color: #cfd8e3; font: 13px/1.4 ui-monospace, Consolas, monospace; }
+canvas { display: block; width: 100vw; height: 100vh; }
+#setup { position: fixed; inset: 0; z-index: 20; background: rgba(32,40,48,0.92); display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 24px; }
+#setup.hide { display: none; }
+#setup h1 { margin: 0 0 8px; font-size: 22px; letter-spacing: 0.5px; }
+#setup .subtitle { opacity: 0.7; margin-bottom: 18px; font-size: 12px; }
+#maplist { max-height: 55vh; overflow: auto; width: min(720px, 94vw); border: 1px solid #3a4653; border-radius: 6px; background: #1b222b; }
+.maprow { display: block; width: 100%; text-align: left; background: none; border: 0; border-bottom: 1px solid #232c36; color: #cfd8e3; font: inherit; padding: 8px 12px; cursor: pointer; }
+.maprow:hover { background: #2a3644; }
+.maprow .dim { opacity: 0.6; margin-left: 6px; font-size: 11px; }
+#filter { width: min(720px, 94vw); padding: 6px 8px; margin-bottom: 8px; background: #10151b; color: #cfd8e3; border: 1px solid #3a4653; border-radius: 4px; font: inherit; font-size: 13px; }
+#slots { width: min(720px, 94vw); margin: 16px 0; border-collapse: collapse; font-size: 12px; }
+#slots th, #slots td { padding: 4px 8px; border-bottom: 1px solid #2a323d; text-align: left; }
+#slots th { opacity: 0.7; font-weight: 600; }
+#startbtn { padding: 10px 28px; font: inherit; font-size: 15px; background: #3a7a55; color: #fff; border: 0; border-radius: 4px; cursor: pointer; margin-top: 10px; }
+#startbtn:hover { background: #2e6348; }
+#topbar { position: fixed; top: 0; left: 0; right: 0; height: 42px; background: rgba(27,34,43,0.9); border-bottom: 1px solid #3a4653; z-index: 30; display: flex; align-items: center; padding: 0 12px; gap: 14px; pointer-events: none; font-size: 12px; }
+#topbar * { pointer-events: auto; }
+#topbar button { background: #2a3644; color: #cfd8e3; border: 1px solid #3a4653; border-radius: 4px; padding: 3px 8px; font: inherit; font-size: 12px; cursor: pointer; }
+#topbar button:hover { background: #344556; }
+#topbar .label { opacity: 0.85; }
+#topbar .value { font-weight: 600; }
+#end { position: fixed; inset: 0; z-index: 40; background: rgba(32,40,48,0.92); display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 24px; }
+#end.hide { display: none; }
+#end h2 { margin: 0 0 6px; font-size: 26px; }
+#end .reason { opacity: 0.7; font-size: 14px; margin-bottom: 18px; }
+#end .stats { font-size: 12px; opacity: 0.8; margin-bottom: 20px; }
+#end button { padding: 10px 24px; font: inherit; background: #3a7a55; color: #fff; border: 0; border-radius: 4px; cursor: pointer; }
+</style>
+</head>
+<body>
+<canvas id="cv"></canvas>
+
+<div id="setup">
+  <h1>KaM Skirmish</h1>
+  <div class="subtitle">vs the Remake's Advanced AI · 243 maps · browser-safe sim</div>
+  <input id="filter" type="text" placeholder="filter maps..." autocomplete="off" spellcheck="false">
+  <div id="maplist"></div>
+  <table id="slots">
+    <thead><tr><th>Hand</th><th>Kind</th><th>AI level</th><th>Team</th><th>Color</th></tr></thead>
+    <tbody id="slottbl"></tbody>
+  </table>
+  <button id="startbtn">Start skirmish</button>
+</div>
+
+<div id="topbar">
+  <span class="label">Map</span><span id="mapname" class="value">-</span>
+  <span class="label">Tick</span><span id="tick" class="value">0</span>
+  <span class="label">Time</span><span id="time">0:00</span>
+  <span style="margin-left:auto;"></span>
+  <button id="pausebtn">Pause</button>
+  <button id="speedbtn">1x</button>
+  <button id="endbtn">End</button>
+  <span class="label">Stock</span><span id="stock" class="value">-</span>
+</div>
+
+<!-- elements the shared renderer (play.ts) expects at boot; without them it throws before the game code runs -->
+<div id="hud" style="display:none"></div>
+<div id="err" style="position:fixed;left:10px;bottom:10px;max-width:70vw;color:#ff7d7d;white-space:pre-wrap;font:12px ui-monospace,Consolas,monospace;z-index:99"></div>
+<div id="picker" style="display:none"><span id="pickercount"></span><div id="pickerlist"></div></div>
+
+<div id="end" class="hide">
+  <h2 id="endtitle">Victory / Defeat</h2>
+  <div class="reason" id="endreason">-</div>
+  <div class="stats" id="endstats">-</div>
+  <button id="backbtn">Back to setup</button>
+</div>
+
+<script type="module" src="/apps/web/play.js"></script>
+<script type="module" src="/apps/web/game/game.js"></script>
+</body>
+</html>

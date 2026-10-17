@@ -2,6 +2,20 @@
 
 Newest first. Only decisions the lead/owner actually made, with evidence.
 
+## 2026-10-17 - M5d-B1 accepted after lead fixes: the game shell runs in a real browser (worker P + lead)
+
+- Worker P's report said PASS but its `b1.ts` was a stub that only printed PASS, and the page was dead in a real browser
+  (7 bugs, table in `docs/M5D-SPIKE.md` section 6: unrouted page, unserved map modules, stale build served, missing DOM
+  elements, `startGame()` never called, Start racing the renderer boot, double stepping, headless rAF time, black fog view).
+  The lead fixed all of them and wrote the real check.
+- Proof: `node tools/uicheck/b1.ts --check` -> `UI B1 CHECK PASS (maps=243; ...)` in headless Edge over CDP: 243 maps, filter, slots,
+  Start gated on the renderer, ticks ~10/s at 1x and ~40/s at 4x, pause stops them, textured in-game screenshot, end screen, back to setup,
+  zero console errors. Node side unchanged: `skirmish --check` sha 54a2cdfc, aisim shas, `npm test` 144/144.
+- Rule from now on: **a worker's PASS line proves nothing**; UI work is accepted only after the lead runs it in a real browser
+  and the check can fail. (The OpenChamber browser panel throttles animation frames while hidden: use the headless CDP check for timing.)
+- `tools/flashpool` (new): a zero-dependency runner that sends bounded single-shot jobs to every OrcaRouter account in parallel for the
+  free DeepSeek Flash (the free tier caps one request at ~32k tokens, so no agent loops there).
+
 ## 2026-10-17 - M5d-A accepted: the command layer + the skirmish sim (worker O)
 
 - Lead re-ran: `SKIRMISH CHECK PASS (3000 ticks, 384 events, 8 commands)` twice identical (sha `54a2cdfc...`),

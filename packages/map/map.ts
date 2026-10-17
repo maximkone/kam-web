@@ -22,8 +22,7 @@
 //   lines 2041-2121. Remake: no resource block — ADDN+TILE right after the tile region.
 //
 // Rendering rules (corner heights, UV rotation) are NOT here — see docs/M1-SPIKE.md 2.3.
-import { readFileSync } from 'node:fs';
-import { basename } from 'node:path';
+const MAX_MAP_SIZE = 256;
 
 export interface MapTile { terrain: number; height: number; rot: number; obj: number }
 
@@ -60,7 +59,6 @@ export interface MapHeader {
 
 export interface MapFileParse { map: KaMap; region: MapTileRegion }
 
-const MAX_MAP_SIZE = 256;
 const TILE_RECORD_SIZE = 23;
 const RES_HEAD_SIZE = 22;
 const RES_ENTRY_SIZE = 17;
@@ -68,6 +66,34 @@ const ADDN_HEAD_SIZE = 16; // 'ADDN' + 'TILE' + u32 size + u32 cypher
 const REV_OVERLAY = 10968;  // TileOverlay byte exists only when rev > 10968 (KM_TerrainUtils.pas 164)
 const REV_BLENDING = 10745; // BlendingLvl byte exists only when rev > 10745 (KM_TerrainUtils.pas 187)
 const MAX_LAYERS = 3;       // TKMTerrainTileBasic.Layer[0..2] — the corner byte packs 0..3
+
+function basename(p: string): string {
+  const i = p.lastIndexOf('/');
+  const j = p.lastIndexOf('\\');
+  const idx = Math.max(i, j);
+  return idx >= 0 ? p.slice(idx + 1) : p;
+}
+
+// Uint8Array helpers (replacing Buffer.readInt32LE / readUInt16LE / subarray / toString).
+function u32le(buf: Uint8Array, o: number): number {
+  return (buf[o]! | (buf[o + 1]! << 8) | (buf[o + 2]! << 16) | (buf[o + 3]! << 24)) | 0;
+}
+function i32le(buf: Uint8Array, o: number): number {
+  const v = (buf[o]! | (buf[o + 1]! << 8) | (buf[o + 2]! << 16) | (buf[o + 3]! << 24)) | 0;
+  return v < 0x80000000 ? v : v - 0x100000000;
+}
+function u16le(buf: Uint8Array, o: number): number {
+  return buf[o]! | (buf[o + 1]! << 8);
+}
+function subarray(buf: Uint8Array, start: number, end?: number): Uint8Array {
+  if (end === undefined) return buf.subarray(start);
+  return buf.subarray(start, end);
+}
+function latin1String(buf: Uint8Array, start: number, end: number): string {
+  let s = '';
+  for (let i = start; i < end; i++) s += String.fromCharCode(buf[i]!);
+  return s;
+}
 
 function bail(path: string, why: string): never {
   throw new Error(`map: ${path}: ${why}`);
@@ -92,13 +118,13 @@ function tryStrToInt(s: string): number | null {
  * Walk the header and locate the tile region; throws a named error on a malformed header.
  * Exported for the map list (size + format only, no tile walk).
  */
-export function readMapHeader(file: Buffer, path: string): MapHeader {
+export function readMapHeader(file: Uint8Array, path: string): MapHeader {
   if (file.length < 8) bail(path, `file shorter than 8 bytes (${file.length})`);
-  const first = file.readInt32LE(0);
+  const first = i32le(file, 0);
 
   if (first !== 0) {
     const mapX = first;
-    const mapY = file.readInt32LE(4);
+    const mapY = i32le(file, 4);
     if (!dimensionsFit(mapX, mapY)) {
       bail(path, `wrong dimensions [${mapX}:${mapY}], expected 1..${MAX_MAP_SIZE}`);
     }
@@ -112,23 +138,23 @@ export function readMapHeader(file: Buffer, path: string): MapHeader {
   // Remake form: i32 0 | UnicodeString revision | u32 mapDataSize | i32 mapX | i32 mapY.
   let o = 4;
   if (o + 2 > file.length) bail(path, 'Remake header: truncated revision string length');
-  const chars = file.readUInt16LE(o);
+  const chars = u16le(file, o);
   o += 2;
   if (o + 2 * chars > file.length) {
     bail(path, `Remake header: revision string of ${chars} chars exceeds the file size`);
   }
   let revText = '';
-  for (let i = 0; i < chars; i++) revText += String.fromCharCode(file.readUInt16LE(o + 2 * i));
+  for (let i = 0; i < chars; i++) revText += String.fromCharCode(u16le(file, o + 2 * i));
   o += 2 * chars;
   // KM_Utils.pas 91: the revision is the string minus its first character, TryStrToInt'd.
   const rev = tryStrToInt(revText.slice(1));
   if (rev === null) bail(path, `unexpected game revision "${revText}" in the map header`);
   if (o + 4 > file.length) bail(path, 'Remake header: truncated mapDataSize');
-  const mapDataSize = file.readUInt32LE(o);
+  const mapDataSize = u32le(file, o);
   o += 4;
   if (o + 8 > file.length) bail(path, 'Remake header: truncated dimensions');
-  const mapX = file.readInt32LE(o);
-  const mapY = file.readInt32LE(o + 4);
+  const mapX = i32le(file, o);
+  const mapY = i32le(file, o + 4);
   o += 8;
   if (!dimensionsFit(mapX, mapY)) {
     bail(path, `wrong dimensions [${mapX}:${mapY}], expected 1..${MAX_MAP_SIZE}`);
@@ -140,7 +166,7 @@ export function readMapHeader(file: Buffer, path: string): MapHeader {
 }
 
 /** Standard maps: copy [terrain, height, rot, obj] out of the 23-byte records (M1 contract). */
-function readStandardTiles(file: Buffer, header: MapHeader): { tiles: Uint8Array; baseTerrain: Uint16Array } {
+function readStandardTiles(file: Uint8Array, header: MapHeader): { tiles: Uint8Array; baseTerrain: Uint16Array } {
   const tiles = new Uint8Array(header.mapX * header.mapY * 4);
   const baseTerrain = new Uint16Array(header.mapX * header.mapY);
   for (let o = header.tileStart, t = 0; t < tiles.length; o += TILE_RECORD_SIZE, t += 4) {
@@ -163,7 +189,7 @@ function readStandardTiles(file: Buffer, header: MapHeader): { tiles: Uint8Array
  * consumer walking `layers` can read each tile's corners/blending/layer records unchanged.
  */
 function readRemakeTiles(
-  file: Buffer,
+  file: Uint8Array,
   header: MapHeader,
   path: string,
 ): { tiles: Uint8Array; baseTerrain: Uint16Array; overlay: Uint8Array; layers: Uint8Array; layerBytes: Uint8Array | null } {
@@ -181,10 +207,10 @@ function readRemakeTiles(
   for (let i = 0; i < count; i++) {
     const baseSize = withOverlay ? 9 : 8;
     if (o + baseSize > file.length) bail(path, `Remake tile ${i}: record exceeds the file size`);
-    const terrain = file.readUInt16LE(o);
-    const rot = file[o + 2];
-    const height = file[o + 3];
-    const obj = file.readUInt16LE(o + 4);
+    const terrain = u16le(file, o);
+    const rot = file[o + 2]!;
+    const height = file[o + 3]!;
+    const obj = u16le(file, o + 4);
     o += 7;
     if (withOverlay) {
       overlay[i] = file[o];
@@ -205,7 +231,7 @@ function readRemakeTiles(
     if (layersCnt > 0) {
       const payload = 1 + (withBlending ? 1 : 0) + 3 * layersCnt; // corners [+ blending] + layers
       if (o + payload > file.length) bail(path, `Remake tile ${i}: layer payload exceeds the file size`);
-      chunks.push(file.subarray(o, o + payload));
+      chunks.push(subarray(file, o, o + payload));
       layerTotal += payload;
       o += payload;
     }
@@ -228,7 +254,7 @@ function readRemakeTiles(
   return { tiles, baseTerrain, overlay, layers, layerBytes };
 }
 
-function readTail(file: Buffer, header: MapHeader): KaMap['tail'] {
+function readTail(file: Uint8Array, header: MapHeader): KaMap['tail'] {
   const tailStart = header.tileStart + header.mapDataSize;
   const tailBytes = file.length - tailStart;
 
@@ -236,12 +262,12 @@ function readTail(file: Buffer, header: MapHeader): KaMap['tail'] {
   let resHead: KaMap['tail']['resHead'] = null;
   if (!header.remake && tailBytes >= RES_HEAD_SIZE) {
     resHead = {
-      x1: file.readUInt16LE(tailStart),
-      allocated: file.readInt32LE(tailStart + 2),
-      qty1: file.readInt32LE(tailStart + 6),
-      qty2: file.readInt32LE(tailStart + 10),
-      x5: file.readInt32LE(tailStart + 14),
-      len17: file.readInt32LE(tailStart + 18),
+      x1: u16le(file, tailStart),
+      allocated: i32le(file, tailStart + 2),
+      qty1: i32le(file, tailStart + 6),
+      qty2: i32le(file, tailStart + 10),
+      x5: i32le(file, tailStart + 14),
+      len17: i32le(file, tailStart + 18),
     };
   }
 
@@ -255,15 +281,15 @@ function readTail(file: Buffer, header: MapHeader): KaMap['tail'] {
   let mapEdChunk = false;
   if (chunkAt >= 0 && chunkAt + ADDN_HEAD_SIZE + header.mapX * header.mapY <= file.length) {
     mapEdChunk =
-      file.toString('latin1', chunkAt, chunkAt + 4) === 'ADDN' &&
-      file.toString('latin1', chunkAt + 4, chunkAt + 8) === 'TILE';
+      latin1String(file, chunkAt, chunkAt + 4) === 'ADDN' &&
+      latin1String(file, chunkAt + 4, chunkAt + 8) === 'TILE';
   }
 
   return { resHead, mapEdChunk, tailBytes };
 }
 
 /** Parse one `.map` from an in-memory buffer; `path` is used for the file name and errors. */
-export function parseMapFileBytes(file: Buffer, path: string): MapFileParse {
+export function parseMapFileBytes(file: Uint8Array, path: string): MapFileParse {
   const header = readMapHeader(file, path);
   const standard = header.remake ? null : readStandardTiles(file, header);
   const remake = header.remake ? readRemakeTiles(file, header, path) : null;
@@ -283,13 +309,4 @@ export function parseMapFileBytes(file: Buffer, path: string): MapFileParse {
   return { map, region: { start: header.tileStart, length: header.mapDataSize } };
 }
 
-/** Parse one `.map` file; throws an Error naming the file and the reason when malformed. */
-export function parseMapFile(path: string): KaMap {
-  let file: Buffer;
-  try {
-    file = readFileSync(path);
-  } catch (err) {
-    return bail(path, `cannot read file (${reason(err)})`);
-  }
-  return parseMapFileBytes(file, path).map;
-}
+

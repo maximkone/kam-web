@@ -313,13 +313,6 @@ export function normalizeSlots(slots: SkirmishSlot[], handCount: number): Normal
   return out.sort((a, b) => a.hand - b.hand);
 }
 
-/** The Buffer that map.ts reads (a Node runtime; the browser needs a Uint8Array map entry). */
-function asBuffer(bytes: Uint8Array): Parameters<typeof parseMapFileBytes>[0] {
-  const B = (globalThis as unknown as { Buffer?: { from(data: Uint8Array): Parameters<typeof parseMapFileBytes>[0] } }).Buffer;
-  if (B === undefined) throw new Error('skirmish: no Buffer in this runtime; the browser needs a Uint8Array .map reader');
-  return B.from(bytes);
-}
-
 function emptyMission(maxPlayers: number): Mission {
   return { mapName: '', maxPlayers, humanPlayer: 0, houses: [], streets: [], units: [], wares: [] };
 }
@@ -368,7 +361,7 @@ function keepOpenContent(mission: Mission, open: Set<number>): Mission {
 export function createSkirmish(opts: CreateSkirmishOptions): Skirmish {
   if (!Number.isInteger(opts.seed) || opts.seed < 0) throw new Error('skirmish: seed must be a non-negative integer');
   const mapPath = opts.mapPath ?? 'skirmish.map';
-  const map: KaMap = parseMapFileBytes(asBuffer(opts.mapBytes), mapPath).map;
+  const map: KaMap = parseMapFileBytes(opts.mapBytes, mapPath).map;
   const tiles = parseTilesJson(opts.defines.tilesJson);
   const elems = parseMapElem(opts.defines.mapElem);
   const unitSpecs = parseUnitDat(opts.defines.unitDat);

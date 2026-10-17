@@ -30,7 +30,7 @@
 //    gAIFields.UpdateState → gHands.UpdateState order (KM_Game.pas 3101–3114): the Supervisor first.
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { parseMapFile } from '../../packages/map/map.ts';
+import { parseMapFile } from '../../packages/map/mapfile.ts';
 import { parseTilesJson } from '../../packages/assets/tiledata.ts';
 import { parseMapElem } from '../../packages/assets/mapelem.ts';
 import { parseUnitDat, parseSerfCarry } from '../../packages/assets/unitdat.ts';

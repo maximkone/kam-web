@@ -33,7 +33,7 @@ const WEB_TS_DIR = join(ROOT, 'apps', 'web');
 const WEB_JS_DIR = join(ROOT, 'out', 'web');
 const TSC = join(ROOT, 'node_modules', 'typescript', 'bin', 'tsc');
 const WEB_JS_ROUTE = /^\/apps\/web\/([A-Za-z0-9_-]+)\.js$/;
-const MODULE_ROUTE = /^\/packages\/(sim|assets|mission)\/([A-Za-z0-9_-]+)\.js$/;
+const MODULE_ROUTE = /^\/packages\/(sim|assets|mission|map)\/([A-Za-z0-9_-]+)\.js$/;
 const DEFINES_ROUTE = /^\/defines\/(tiles\.json|mapelem\.dat|unit\.dat|houses\.dat)$/;
 const MAPFILE_ROUTE = /^\/mapfile\/([^/]+)\/([^/]+)\/(map|dat|txt)$/;
 const DEFINES_DIR = process.env.KAM_DATA ?? 'C:\\Users\\me\\Desktop\\KaM Remake\\KaM Remake Beta r15472\\data\\defines';
@@ -306,10 +306,38 @@ const server = createServer((req, res) => {
   }
 
   // The app pages live in apps/web even though the static root is the repo root.
+const GAME_MODULE_ROUTE = /^\/apps\/web\/game\/([A-Za-z0-9_-]+)\.js$/;
+
+  // The game module graph (B1): apps/web/game/*.ts plus imports.
+  const gameMod = path.match(GAME_MODULE_ROUTE);
+  if (gameMod !== null) {
+    try {
+      const tsPath = join(WEB_TS_DIR, 'game', `${gameMod[1]}.ts`);
+      if (!existsSync(tsPath)) {
+        send(res, 404, 'text/plain; charset=utf-8', `not found: ${path}`);
+        return;
+      }
+      const r = spawnSync(
+        process.execPath,
+        [TSC, tsPath, '--ignoreConfig', '--target', 'es2022', '--module', 'esnext', '--rootDir', ROOT, '--outDir', WEB_JS_DIR, '--rewriteRelativeImportExtensions'],
+        { cwd: ROOT, encoding: 'utf8' },
+      );
+      if (r.status !== 0 || !existsSync(join(WEB_JS_DIR, 'apps', 'web', 'game', `${gameMod[1]}.js`))) {
+        throw new Error(`tsc failed (exit ${r.status}): ${r.stdout}${r.stderr}`);
+      }
+      const abs = join(WEB_JS_DIR, 'apps', 'web', 'game', `${gameMod[1]}.js`);
+      send(res, 200, MIME['.js']!, readFileSync(abs));
+    } catch (err) {
+      send(res, 500, 'text/plain; charset=utf-8', `${path} build failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    return;
+  }
+
   const page = path === '/' || path === '/index.html' ? 'index.html'
     : path === '/map.html' ? 'map.html'
       : path === '/play.html' ? 'play.html'
-        : null;
+        : path === '/game.html' ? 'game.html'
+          : null;
   const file = page !== null
     ? join(ROOT, 'apps', 'web', page)
     : join(ROOT, normalize(path).replace(/^[/\\]+/, ''));
@@ -339,6 +367,7 @@ function check(): void {
   }
   const files: [string, string][] = [
     ['play.html', join(WEB_TS_DIR, 'play.html')],
+    ['game.html', join(WEB_TS_DIR, 'game.html')],
     ['map.html', join(WEB_TS_DIR, 'map.html')],
     ['index.html', join(WEB_TS_DIR, 'index.html')],
     ['out/maps/TownTutorial.json', join(ROOT, 'out', 'maps', 'TownTutorial.json')],

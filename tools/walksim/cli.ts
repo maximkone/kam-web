@@ -5,7 +5,7 @@
 //
 // Reads the map via packages/map/map.ts and the defines from the frozen r15472 install (read-only).
 import { readFileSync } from 'node:fs';
-import { parseMapFile } from '../../packages/map/map.ts';
+import { parseMapFile } from '../../packages/map/mapfile.ts';
 import type { KaMap } from '../../packages/map/map.ts';
 import { parseTilesJson } from '../../packages/assets/tiledata.ts';
 import type { TileFlags } from '../../packages/assets/tiledata.ts';

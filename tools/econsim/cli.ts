@@ -9,7 +9,7 @@
 // overridden with KAM_MAP, KAM_DATA (the defines directory) and KAM_MISSION.
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { parseMapFile } from '../../packages/map/map.ts';
+import { parseMapFile } from '../../packages/map/mapfile.ts';
 import { parseTilesJson } from '../../packages/assets/tiledata.ts';
 import { parseMapElem } from '../../packages/assets/mapelem.ts';
 import { parseUnitDat, parseSerfCarry } from '../../packages/assets/unitdat.ts';

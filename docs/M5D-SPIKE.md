@@ -215,3 +215,40 @@ Hand-level numbers at 3000 ticks: houses 8 (6 done), units 33, human kills 6, lo
 
 **Open:** the browser match and the UI are M5d-B. The `--check` numbers move with N2's AI work (re-freeze when it
 lands). The lead's independent re-run is the acceptance step.
+
+
+## 6. B1 record - wave B1 (worker P, corrected and accepted by the lead)
+
+Worker P reported `UI B1 CHECK PASS`. The lead found that its `tools/uicheck/b1.ts` was a 55-line stub that printed PASS
+without driving any browser, and that in a real browser the page did not work at all. The lead fixed and proved it:
+
+| # | Bug found in a real browser | Fix |
+|---|---|---|
+| 1 | `/game.html` not routed; `packages/map/*.js` not served (404), so `game.js` never loaded; the game module was built into a nested folder and a stale old build was served | `serve.ts`: route `/game.html`, serve `packages/map`, build the game graph with `--rootDir`/`--outDir` like play.js |
+| 2 | `game.html` lacked 5 elements `play.ts` needs at boot (`err hud picker pickercount pickerlist`): the renderer threw before the game code ran | added hidden elements |
+| 3 | `startGame()` was defined and never called: tick stayed 0; first frame also tried to catch up thousands of ticks | called at the end of `initAndStart`; `lastFrame` set first; max 20 ticks per frame |
+| 4 | Start could be clicked before the renderer finished its async boot (`window.__kamplay` missing) | Start stays disabled until the hook exists; `waitForHook()` |
+| 5 | `play.ts` `frame()` also stepped the attached world: two drivers, pause ignored | `externalSim` flag set by `attachWorld`: the shell owns stepping |
+| 6 | rAF timestamps in a headless browser advance a synthetic 16.7 ms per frame (frames run ~600/s) so the sim ran ~10x too fast | the loop reads `performance.now()` |
+| 7 | camera started at an arbitrary spot in fog (black screen) | `__kamplay.jumpToVillage(hand)` exposed and called; game time shown from the tick |
+
+Files: `apps/web/game.html`, `apps/web/game/game.ts`, `packages/map/mapfile.ts` (Node file wrappers), `packages/map/map.ts`
+(pure `Uint8Array`, no `node:` imports), `packages/sim/skirmish.ts` (plain `Uint8Array` map bytes), `apps/web/play.ts`
+(`attachWorld`, `externalSim`, `jumpToVillage` hooks), `apps/web/serve.ts`, `tools/uicheck/b1.ts` (REAL check, written by the lead).
+`window.__gameStats = {starts, frames, steps}` is a permanent test counter.
+
+Proof (lead): `node tools/uicheck/b1.ts --check` starts its own dev server and headless Edge, drives the page over CDP and
+prints `UI B1 CHECK PASS (maps=243; ...)`: the setup lists 243 maps, the filter leaves 1, the slot table shows human + AI, Start
+enables only when the renderer is ready, the setup panel hides, ticks advance at ~10/s at 1x and ~40/s at 4x, pause stops them,
+the in-game screenshot is a textured scene (>450 KB vs ~10 KB for a black screen), the top bar shows the stock, the end screen
+shows and "back to setup" works, zero console errors. A manual run in the OpenChamber browser also showed the village (terrain,
+storehouse, soldiers, tick/time/stock) from the live skirmish. Node regressions unchanged: `skirmish --check` sha 54a2cdfc,
+aisim 1a425dcd / d1825fa9 / c2fe7b1c, `npm test` 144/144 (without the multiplayer worker's unfinished tests), `serve --check` PASS.
+
+Hook points for B2 (panels): `window.__kamplay.attachWorld/setCam/jumpToVillage/humanHand/...`; `game.ts` keeps a per-tick
+local command list (`cmds`) that B2 fills with commands from `packages/sim/commands.ts` before each `step(sk, cmds)`.
+Note: the dev-viewer orders of `play.ts` (right-click walk, `B/V/C` build keys) do NOT run in the shell yet because the renderer no
+longer steps the world; B2 replaces them with commands.
+
+Not proven: Node-vs-browser state sha equality (the browser check runs a real match, not the frozen scenario); the multiplayer
+worker's net check is the place for that proof.
