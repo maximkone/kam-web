@@ -1,9 +1,18 @@
-// play.ts — M3 economy viewer: the Town Tutorial village (docs/M3-SPIKE.md section 5).
+// play.ts — M3 economy viewer: the Town Tutorial village (docs/M3-SPIKE.md section 5) + the M3b
+// any-map picker (docs/M3B-SPIKE.md sections 3 and 5).
 //
 // Terrain rendering + camera are the M1 mapdemo renderer (copied through the M2b play.ts, which
 // stays the ancestor): one static VBO for all tiles, one drawElements, camera as a uniform.
 // On top of that this page runs the headless economy sim (packages/sim/economy.ts) on the real
 // mission (Town Tutorial.dat): houses, roads, trees, wares and serfs, at 10 ticks/s.
+//
+// M3b: the page boots the Town Tutorial as before; /play.html?kind=MapsMP&name=Arena (or the map
+// picker, key M, list from /maps) loads any scanned map instead. For a scanned map the viewer
+// renders terrain + the mission's houses/units/streets as-is, plus the Remake map's stored
+// overlays (roads via the connectivity table over overlay toRoad + !SET_STREET; digs 249/251/253/255
+// plain rot 0) — the economy world + demo scenario stay tutorial-only (spec section 5). Layered
+// tiles draw the base layer only (documented v0 simplification). The .map bytes are walked by
+// apps/web/mapread.ts (the browser-side reader of the same frozen KaMap shape).
 //
 // Frozen interfaces used (docs/M3-SPIKE.md section 3): parseMissionScript, parseHousesDat,
 // WARE_CNT/WARE_NAMES/WT_*, parseSerfCarry, createEconomyWorld, applyDemoScenario.
@@ -40,17 +49,29 @@ import { createEconomyWorld, applyDemoScenario } from '../../packages/sim/econom
 import { tileWalkable } from '../../packages/sim/terrain.ts';
 import { findPath } from '../../packages/sim/astar.ts';
 import { startWalk, walkTick, walkSpeeds } from '../../packages/sim/walk.ts';
+import { parseMapBytes } from './mapread.ts';
 import type { Walk } from '../../packages/sim/walk.ts';
 import type { PassGrid } from '../../packages/sim/terrain.ts';
+import type { TileFlags } from '../../packages/assets/tiledata.ts';
 import type { UnitSpec, AnimLoop } from '../../packages/assets/unitdat.ts';
 import type { HouseSpec } from '../../packages/assets/housedata.ts';
 import type { MapElem } from '../../packages/assets/mapelem.ts';
 import type { Mission } from '../../packages/mission/mission.ts';
 import type { EconomyWorld, EconHouse, EconUnit, SimEvent } from '../../packages/sim/economy.ts';
 import type { KaMap } from '../../packages/map/map.ts';
+import type { LoadedMap } from './mapread.ts';
 
 // ---- frozen viewer data shapes (M1 section 3.2 + M0 section 3) --------------
 interface MapJson { file: string; mapX: number; mapY: number; tiles: string }
+interface MapMeta { file: string; mapX: number; mapY: number }
+/** The /maps entry fields the picker shows (docs/M3B-SPIKE.md section 3 MapInfo). */
+interface MapInfoView {
+  kind: string; name: string;
+  mapX: number; mapY: number; remake: boolean; rev: number;
+  maxPlayers: number; tactic: boolean; smallDesc: string; valid: boolean;
+  canBeHuman: boolean[]; classicAI: boolean[]; advancedAI: boolean[];
+  aiStart: { x: number; y: number }[];
+}
 interface AtlasSheet { file: string; w: number; h: number }
 interface AtlasSprite { i: number; w: number; h: number; px: number; py: number; s: number; x: number; y: number; ms: number; mx: number; my: number }
 interface Atlas { pack: string; sheets: AtlasSheet[]; maskSheets: AtlasSheet[]; sprites: AtlasSprite[] }
@@ -96,6 +117,9 @@ const ROADS_CONNECTIVITY: [number, number][] = [
   [248, 0], [248, 0], [248, 1], [250, 3], [248, 0], [248, 0], [250, 0], [252, 0],
   [248, 1], [250, 2], [248, 1], [252, 3], [250, 1], [252, 2], [252, 1], [254, 0],
 ];
+// TILE_OVERLAY_IDS (KM_TerrainTypes.pas:176), atlas i = render id - 1 (M1 errata): the digs draw
+// plain, rot 0 (docs/M3B-SPIKE.md section 5). Index = TileOverlay (1..4).
+const DIG_OVERLAY_IDS: number[] = [0, 249, 251, 253, 255];
 // CHOPABLE_TREES[1..13] = (age1, age2, age3, ageFull, fall, stump) (KM_ResMapElements.pas:61-78).
 const CHOPABLE_TREES: [number, number, number, number, number, number][] = [
   [88, 89, 90, 90, 91, 37], [97, 98, 99, 100, 101, 41], [102, 103, 104, 105, 106, 45],
@@ -228,14 +252,27 @@ gl.enable(gl.BLEND);
 gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
 
 // ---- state ------------------------------------------------------------------
-let map: MapJson | null = null;
+let map: MapMeta | null = null;           // current map {file, mapX, mapY}
+let mapSource: { kind: string; name: string } | null = null; // null = Town Tutorial
+let loadedMap: LoadedMap | null = null;   // the scanned .map walk (overlay/layers/rev/tail)
+let mapRev = 0;                           // parsed revision (0 = standard / tutorial export)
+let mapRemake = false;
+let mapInfo: MapInfoView | null = null;   // the /maps entry of the current map (null = tutorial)
+let mapList: MapInfoView[] = [];          // the scanned map list (/maps)
+let loadToken = 0;                        // guards out-of-order async map switches
 let atlas: Atlas | null = null;          // Tileset atlas (M1 renderer)
 let tiles: Uint8Array | null = null;     // mapX*mapY*4: [terrain, height, rot, obj]
+let baseTerrain: Uint16Array | null = null; // true terrain ids (Remake Word; null = use the byte)
+let tileFlags: TileFlags[] = [];         // tiles.json (parsed once)
 let sheetTex: WebGLTexture[] = [];
 let terrainVao: WebGLVertexArrayObject | null = null;
 let terrainIndexCount = 0;
-let roadVao: WebGLVertexArrayObject | null = null;
-let roadIndexCount = 0;
+let terrainBuffers: WebGLBuffer[] = [];
+let overlayVao: WebGLVertexArrayObject | null = null;
+let overlayIndexCount = 0;
+let overlayBuffers: WebGLBuffer[] = [];
+let roadQuadCount = 0;
+let digQuadCount = 0;
 
 let unitsAtlas: Atlas | null = null;
 let housesAtlas: Atlas | null = null;
@@ -257,10 +294,13 @@ let elems: MapElem[] = [];
 let houseSpecs: (HouseSpec | undefined)[] = [];
 let mission: Mission | null = null;
 let world: EconomyWorld | null = null;
+let staticHouses: EconHouse[] = [];                              // mission entities of non-tutorial maps
+let staticUnits: EconUnit[] = [];
 let treeAnims: { steps: number[]; count: number }[] = [];       // per mapelem object id
 let supplyIn: Int16Array[] = [];                                 // per house type id, 4 slots x 5 counts
 let supplyOut: Int16Array[] = [];
 let roadTiles: Set<number> = new Set();                          // grid index (y*(mapX+1)+x) of toRoad tiles
+let digTiles: Map<number, number> = new Map();                   // grid index -> TileOverlay 1..4 (toDig1..4)
 
 // Object tiles + falling-tree tracking (viewer-side; the frozen world API has no falling list).
 let objTiles: number[] = [];
@@ -418,8 +458,10 @@ function buildTerrainVbo(byI: Map<number, AtlasSprite>): void {
   for (let ty = 1; ty <= my; ty++) {
     for (let tx = 1; tx <= mx; tx++) {
       const off = ((ty - 1) * mx + (tx - 1)) * 4;
-      const terrain = tiles[off];
-      const rot = tiles[off + 2] & 3; // original maps store raw rot > 3 (section 2.1); render uses rot & 3
+      // True terrain id: the Remake Terrain Word (G's baseTerrain) or the M1 byte for standard maps
+      // (some Remake maps carry ids > 255; the low byte aliases them onto foreign sprites).
+      const terrain = baseTerrain !== null ? baseTerrain[off >> 2]! : tiles[off]!;
+      const rot = tiles[off + 2]! & 3; // original maps store raw rot > 3 (section 2.1); render uses rot & 3
 
       // Sprite for terrain id t is the atlas entry with i == t (M1 errata: atlas i = game render id - 1).
       let u1 = 0;
@@ -489,12 +531,16 @@ function buildTerrainVbo(byI: Map<number, AtlasSprite>): void {
   }
   if (missing > 0) console.warn(`play: ${missing} tiles have no atlas sprite (drawn as zero UV)`);
 
+  for (const b of terrainBuffers) gl!.deleteBuffer(b);
+  if (terrainVao !== null) gl!.deleteVertexArray(terrainVao);
   terrainVao = gl!.createVertexArray()!;
   gl!.bindVertexArray(terrainVao);
   const vbo = gl!.createBuffer()!;
+  terrainBuffers = [vbo];
   gl!.bindBuffer(gl!.ARRAY_BUFFER, vbo);
   gl!.bufferData(gl!.ARRAY_BUFFER, verts, gl!.STATIC_DRAW);
   const ebo = gl!.createBuffer()!;
+  terrainBuffers.push(ebo);
   gl!.bindBuffer(gl!.ELEMENT_ARRAY_BUFFER, ebo);
   gl!.bufferData(gl!.ELEMENT_ARRAY_BUFFER, inds, gl!.STATIC_DRAW);
   const aPos = gl!.getAttribLocation(terrainProg, 'aPos');
@@ -508,13 +554,15 @@ function buildTerrainVbo(byI: Map<number, AtlasSprite>): void {
 }
 
 /**
- * Road overlay pass (M3 spec 2.9): every toRoad tile draws its connectivity sprite. The overlay is
- * a runtime field (the legacy .map has no overlay byte), and in the Town Tutorial it comes from the
- * mission's !SET_STREET list (KM_MissionScript_Standard.pas:456-457 -> SetRoads, spec 2.1), so the
- * viewer builds one static VBO from mission.streets + the neighbor mask N=1,E=2,S=4,W=8.
+ * Overlay pass (M3 spec 2.9 + M3b spec section 5): one static VBO with two quad groups —
+ *  - roads: every toRoad tile (the mission's !SET_STREET list, plus the Remake map's stored
+ *    overlay toRoad) draws its connectivity sprite from the neighbor mask N=1,E=2,S=4,W=8
+ *    (KM_RenderTerrain.pas:808-836 -> ROADS_CONNECTIVITY);
+ *  - digs: every stored toDig1..toDig4 overlay draws TILE_OVERLAY_IDS[ov] = 249/251/253/255
+ *    plain, rot 0 (KM_TerrainTypes.pas:176, KM_RenderTerrain.pas:838-839).
  */
-function buildRoadVbo(): void {
-  if (map === null || atlas === null || mission === null) return;
+function buildOverlayVbo(): void {
+  if (map === null || atlas === null) return;
   const mx = map.mapX;
   const my = map.mapY;
   const stride = mx + 1;
@@ -532,6 +580,13 @@ function buildRoadVbo(): void {
     const entry = ROADS_CONNECTIVITY[mask]!;
     quads.push({ x, y, id: entry[0], rot: entry[1] });
   }
+  roadQuadCount = quads.length;
+  for (const [idx, ov] of digTiles) {
+    const x = idx % stride;
+    const y = (idx - x) / stride;
+    quads.push({ x, y, id: DIG_OVERLAY_IDS[ov]!, rot: 0 });
+  }
+  digQuadCount = quads.length - roadQuadCount;
 
   const verts = new Float32Array(quads.length * 16);
   const inds = new Uint32Array(quads.length * 6);
@@ -602,14 +657,18 @@ function buildRoadVbo(): void {
     inds[q * 6 + 5] = b + 2;
     q++;
   }
-  if (missing > 0) console.warn(`play: ${missing} road sprites missing from the Tileset atlas`);
+  if (missing > 0) console.warn(`play: ${missing} overlay sprites missing from the Tileset atlas`);
 
-  roadVao = gl!.createVertexArray()!;
-  gl!.bindVertexArray(roadVao);
+  for (const b of overlayBuffers) gl!.deleteBuffer(b);
+  if (overlayVao !== null) gl!.deleteVertexArray(overlayVao);
+  overlayVao = gl!.createVertexArray()!;
+  gl!.bindVertexArray(overlayVao);
   const vbo = gl!.createBuffer()!;
+  overlayBuffers = [vbo];
   gl!.bindBuffer(gl!.ARRAY_BUFFER, vbo);
   gl!.bufferData(gl!.ARRAY_BUFFER, verts, gl!.STATIC_DRAW);
   const ebo = gl!.createBuffer()!;
+  overlayBuffers.push(ebo);
   gl!.bindBuffer(gl!.ELEMENT_ARRAY_BUFFER, ebo);
   gl!.bufferData(gl!.ELEMENT_ARRAY_BUFFER, inds, gl!.STATIC_DRAW);
   const aPos = gl!.getAttribLocation(terrainProg, 'aPos');
@@ -619,7 +678,7 @@ function buildRoadVbo(): void {
   gl!.enableVertexAttribArray(aUV);
   gl!.vertexAttribPointer(aUV, 2, gl!.FLOAT, false, 16, 8);
   gl!.bindVertexArray(null);
-  roadIndexCount = q * 6;
+  overlayIndexCount = q * 6;
 }
 
 /** Shared 0..1 quad for sprites and the selection ring. */
@@ -718,8 +777,8 @@ function tileAtPoint(sx: number, sy: number): { x: number; y: number } | null {
 
 /** Camera keys 1/2/3: the village centre of a hand (centroid of its houses), at village zoom. */
 function jumpToVillage(owner: number): boolean {
-  if (world === null) return false;
-  const houses = world.houses.filter((h) => h.owner === owner);
+  if (world === null && staticHouses.length === 0) return false;
+  const houses = activeHouses().filter((h) => h.owner === owner);
   if (houses.length === 0) return false;
   let sx = 0;
   let sy = 0;
@@ -777,14 +836,23 @@ function tintFor(owner: number): { tint: [number, number, number]; useMask: bool
 }
 
 // ---- units (M2b section 5 + M3 carry overlay) --------------------------------
+/** The entities the current mode draws: the economy world (tutorial) or the mission's static lists. */
+function activeHouses(): EconHouse[] {
+  return world !== null ? world.houses : staticHouses;
+}
+
+function activeUnits(): EconUnit[] {
+  return world !== null ? world.units : staticUnits;
+}
+
 function selectedUnit(): EconUnit | null {
-  if (world === null || selectedUid === 0) return null;
-  return world.units.find((u) => u.uid === selectedUid) ?? null;
+  if (selectedUid === 0) return null;
+  return activeUnits().find((u) => u.uid === selectedUid) ?? null;
 }
 
 function selectedHouse(): EconHouse | null {
-  if (world === null || selectedHouseUid === 0) return null;
-  return world.houses.find((h) => h.uid === selectedHouseUid) ?? null;
+  if (selectedHouseUid === 0) return null;
+  return activeHouses().find((h) => h.uid === selectedHouseUid) ?? null;
 }
 
 /** Unit anchor: world px at (posF + UNIT_OFF) * 40 minus the terrain height shift (M2b spec 5). */
@@ -955,9 +1023,30 @@ function objectAnchor(x: number, y: number, obj: number, sp: AtlasSprite): { cor
  * treeAt() for the TreeAge: a stump object with TreeAge > 0 is a falling tree (spec 2.4).
  */
 function objAt(idx: number): number {
-  if (world === null) return OBJ_NONE;
+  if (world === null) return objOverride.get(idx) ?? OBJ_NONE;
   const fromGrid = world.grid.obj[idx]!;
   return fromGrid !== OBJ_NONE ? fromGrid : objOverride.get(idx) ?? OBJ_NONE;
+}
+
+/** Static mode: the object tiles of the raw map (mission maps have no sim to scan each tick). */
+function buildMapObjectTiles(fillStatic: boolean): void {
+  if (map === null || tiles === null) return;
+  const stride = map.mapX + 1;
+  mapObjectTiles = [];
+  for (let y = 1; y <= map.mapY; y++) {
+    for (let x = 1; x <= map.mapX; x++) {
+      const obj = tiles[((y - 1) * map.mapX + (x - 1)) * 4 + 3];
+      if (obj !== OBJ_NONE && obj !== OBJ_BLOCK) mapObjectTiles.push(y * stride + x);
+    }
+  }
+  if (!fillStatic) return; // tutorial: scanObjects owns objTiles/objOverride
+  objTiles = mapObjectTiles.slice();
+  objOverride = new Map();
+  for (const idx of mapObjectTiles) {
+    const x = idx % stride;
+    const y = (idx - x) / stride;
+    objOverride.set(idx, tiles[((y - 1) * map.mapX + (x - 1)) * 4 + 3]!);
+  }
 }
 
 function scanObjects(): void {
@@ -1037,7 +1126,45 @@ function ensureScan(): void {
 // ---- counters (page counters + the fast-forward hook) ------------------------
 function counts(): Record<string, number> {
   const w = world;
-  if (w === null) return { tick: 0 };
+  if (w === null) {
+    // Static mode (a scanned non-tutorial map): the mission's entities + the raw map's objects.
+    let trees = 0;
+    let fullTrees = 0;
+    let stumps = 0;
+    let otherObjects = 0;
+    for (const idx of objTiles) {
+      const obj = objAt(idx);
+      if (FULL_TREE_OBJS.has(obj)) {
+        fullTrees++;
+        trees++;
+      } else if (ALL_TREE_OBJS.has(obj)) {
+        trees++;
+      } else if (STUMP_OBJS.has(obj)) {
+        stumps++;
+      } else {
+        otherObjects++;
+      }
+    }
+    return {
+      tick: 0,
+      houses: staticHouses.length,
+      units: staticUnits.length,
+      serfs: staticUnits.filter((u) => u.type === 0).length,
+      tasked: 0,
+      trees,
+      fullTrees,
+      stumps,
+      falling: 0,
+      otherObjects,
+      trunks: 0,
+      timber: 0,
+      sawmillTimber: 0,
+      storeTrunks: 0,
+      events: 0,
+      roads: roadTiles.size,
+      digs: digTiles.size,
+    };
+  }
   ensureScan();
   let trees = 0;
   let fullTrees = 0;
@@ -1107,7 +1234,7 @@ function render(): void {
   gl!.clear(gl!.COLOR_BUFFER_BIT);
   ensureScan();
 
-  // Terrain: one drawElements (M1 renderer) + the road overlay pass (M3 spec 2.9).
+  // Terrain: one drawElements (M1 renderer) + the overlay pass (roads + digs; M3 spec 2.9).
   gl!.useProgram(terrainProg);
   gl!.uniform2f(uT.cam, camX, camY);
   gl!.uniform1f(uT.zoom, zoom);
@@ -1117,15 +1244,17 @@ function render(): void {
   gl!.uniform1i(uT.tex, 0);
   gl!.bindVertexArray(terrainVao);
   gl!.drawElements(gl!.TRIANGLES, terrainIndexCount, gl!.UNSIGNED_INT, 0);
-  if (roadVao !== null && roadIndexCount > 0) {
-    gl!.bindVertexArray(roadVao);
-    gl!.drawElements(gl!.TRIANGLES, roadIndexCount, gl!.UNSIGNED_INT, 0);
+  if (overlayVao !== null && overlayIndexCount > 0) {
+    gl!.bindVertexArray(overlayVao);
+    gl!.drawElements(gl!.TRIANGLES, overlayIndexCount, gl!.UNSIGNED_INT, 0);
   }
   gl!.bindVertexArray(null);
 
   // Sprites: rings first, then every entity sorted by its ground line (painter's order).
   const drawn = { units: 0, houses: 0, objects: 0, missing: 0 };
-  if (world !== null && quadVao !== null) {
+  const houses = activeHouses();
+  const units = activeUnits();
+  if ((houses.length > 0 || units.length > 0 || objTiles.length > 0) && quadVao !== null) {
     gl!.useProgram(spriteProg);
     gl!.uniform2f(uS.cam, camX, camY);
     gl!.uniform1f(uS.zoom, zoom);
@@ -1140,8 +1269,8 @@ function render(): void {
     const selH = selectedHouse();
     if (selH !== null) drawHouseRing(selH);
 
-    const w = world;
-    const stride = w.grid.mapX + 1;
+    const stride = map.mapX + 1;
+    const tick = world === null ? 0 : world.tickCount;
     const list: { y: number; run: () => void }[] = [];
 
     if (treesAtlas !== null) {
@@ -1149,7 +1278,7 @@ function render(): void {
         const x = idx % stride;
         const y = (idx - x) / stride;
         const obj = objAt(idx);
-        const sp = objectSprite(obj, w.tickCount);
+        const sp = objectSprite(obj, tick);
         if (sp === undefined) {
           drawn.missing++;
         } else {
@@ -1162,7 +1291,7 @@ function render(): void {
         if (f !== undefined) {
           const anim = treeAnims[f.fallObj];
           if (anim !== undefined && anim.count > 0) {
-            const elapsed = Math.max(0, Math.min(w.tickCount - f.start, anim.count - 1));
+            const elapsed = Math.max(0, Math.min(tick - f.start, anim.count - 1));
             const fsp = objectSprite(f.fallObj, elapsed);
             if (fsp !== undefined) {
               const fa = objectAnchor(x, y, f.fallObj, fsp);
@@ -1173,7 +1302,7 @@ function render(): void {
       }
     }
 
-    for (const h of w.houses) {
+    for (const h of houses) {
       const hs = houseSpriteOf(h);
       if (hs === null) {
         drawn.missing++;
@@ -1182,7 +1311,7 @@ function render(): void {
       list.push({ y: hs.cornerY + hs.sp.h, run: () => drawHouseEntity(h, drawn) });
     }
 
-    for (const u of w.units) {
+    for (const u of units) {
       if (u.inside) continue; // invisible inside a house (spec 2.6)
       const sp = unitSprite(u);
       if (sp === undefined) {
@@ -1203,7 +1332,9 @@ function render(): void {
 
 function updateHud(): void {
   if (map === null) return;
-  const lines = [`${map.file}  ${map.mapX}\u00d7${map.mapY}  zoom=${zoom.toFixed(3)}  cam=(${Math.round(camX)},${Math.round(camY)})`];
+  const src = mapSource === null ? 'Town Tutorial (tutorial)' : `${mapSource.kind}/${mapSource.name}`;
+  const fmt = mapRemake ? `Remake r${mapRev}` : 'Standard';
+  const lines = [`${src}  ${map.mapX}\u00d7${map.mapY} ${fmt}  zoom=${zoom.toFixed(3)}  cam=(${Math.round(camX)},${Math.round(camY)})`];
   if (hoverX >= 1 && hoverY >= 1 && tiles !== null) {
     const off = ((hoverY - 1) * map.mapX + (hoverX - 1)) * 4;
     const walk = world === null ? '?' : tileWalkable(world.grid, hoverX, hoverY) ? 'walk' : 'blocked';
@@ -1212,13 +1343,16 @@ function updateHud(): void {
     lines.push('tile (-,-) move the pointer over the map');
   }
   const sel = selectedUnit();
-  let line = `tick=${world === null ? 0 : world.tickCount} units=${world === null ? 0 : world.units.length} selected=${sel === null ? '-' : sel.uid}`;
+  let line = `tick=${world === null ? 0 : world.tickCount} units=${activeUnits().length} selected=${sel === null ? '-' : sel.uid}`;
   if (sel !== null) line += ` type=${sel.type} action=${sel.action} task=${sel.taskKind} pos=(${sel.posF.x.toFixed(2)},${sel.posF.y.toFixed(2)})`;
   lines.push(line);
 
   if (world !== null) {
     const c = counts();
     lines.push(`houses=${c.houses} serfs=${c.serfs} trees=${c.trees} full=${c.fullTrees} stumps=${c.stumps} falling=${c.falling} trunks=${c.trunks} timber=${c.timber}`);
+  } else {
+    const c = counts();
+    lines.push(`mission houses=${c.houses} units=${c.units} serfs=${c.serfs} trees=${c.trees} full=${c.fullTrees} roads=${c.roads} digs=${c.digs}`);
   }
 
   const sh = selectedHouse();
@@ -1312,10 +1446,9 @@ function stepWorld(): void {
 
 // ---- input (M2b spec 5 + M3 camera keys) ------------------------------------
 function selectAt(sx: number, sy: number): void {
-  if (world === null) return;
   let best: EconUnit | null = null;
   let bestDist = SELECT_RADIUS_PX;
-  for (const u of world.units) {
+  for (const u of activeUnits()) {
     if (u.inside) continue;
     const p = unitSpriteCenterScreen(u);
     if (p === null) continue;
@@ -1333,7 +1466,7 @@ function selectAt(sx: number, sy: number): void {
   // No unit under the cursor: a house sprite rect (topmost drawn one wins).
   let pick: EconHouse | null = null;
   let pickY = -Infinity;
-  for (const h of world.houses) {
+  for (const h of activeHouses()) {
     const hs = houseSpriteOf(h);
     if (hs === null) continue;
     const tl = worldToScreen(hs.cornerX, hs.cornerY);
@@ -1434,6 +1567,21 @@ function bindInput(): void {
     camY = wy - (sy - viewH / 2) / zoom;
   }, { passive: false });
   window.addEventListener('keydown', (e) => {
+    // The picker's filter box owns its keystrokes (M3b): only Escape acts globally.
+    if (e.target instanceof HTMLInputElement) {
+      if (e.key === 'Escape') closePicker();
+      return;
+    }
+    if (e.key === 'm' || e.key === 'M') {
+      e.preventDefault(); // keep the "m" out of the filter box openPicker just focused
+      togglePicker();
+      return;
+    }
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      closePicker();
+      return;
+    }
     if (e.key === 'r' || e.key === 'R') {
       resetView();
       return;
@@ -1466,20 +1614,290 @@ function frame(now: number): void {
   requestAnimationFrame(frame);
 }
 
+// ---- M3b map picker (docs/M3B-SPIKE.md section 5) ---------------------------
+const pickerEl = document.getElementById('picker') as HTMLDivElement;
+const pickerListEl = document.getElementById('pickerlist') as HTMLDivElement;
+const pickerCountEl = document.getElementById('pickercount') as HTMLSpanElement;
+const filterEl = document.getElementById('filter') as HTMLInputElement;
+
+function escHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+/** List from /maps: name, size, players, Remake r<rev>/Standard, tactic/building (spec section 5). */
+function renderPickerList(): void {
+  const q = filterEl.value.trim().toLowerCase();
+  const items = mapList.filter((m) => q === '' || m.name.toLowerCase().includes(q));
+  pickerCountEl.textContent = `${items.length}/${mapList.length}`;
+  const rows: string[] = [
+    '<button class="maprow tutorial" data-tutorial="1"><b>Town Tutorial</b> <span class="dim">128\u00d7128 tutorial \u00b7 economy demo</span></button>',
+  ];
+  for (const m of items) {
+    const fmt = m.remake ? `Remake r${m.rev}` : 'Standard';
+    const mode = m.tactic ? 'tactic' : 'building';
+    rows.push(
+      `<button class="maprow" data-kind="${escHtml(m.kind)}" data-name="${escHtml(m.name)}">` +
+        `<b>${escHtml(m.name)}</b> <span class="dim">${m.mapX}\u00d7${m.mapY} ${m.maxPlayers}P ${fmt} ${mode}</span></button>`,
+    );
+  }
+  pickerListEl.innerHTML = rows.join('');
+}
+
+function openPicker(): void {
+  pickerEl.classList.remove('closed');
+  renderPickerList();
+  filterEl.focus();
+  filterEl.select();
+}
+
+function closePicker(): void {
+  pickerEl.classList.add('closed');
+}
+
+function togglePicker(): void {
+  if (pickerEl.classList.contains('closed')) openPicker();
+  else closePicker();
+}
+
+function bindPicker(): void {
+  filterEl.addEventListener('input', renderPickerList);
+  pickerListEl.addEventListener('click', (e) => {
+    const el = (e.target as HTMLElement).closest('button.maprow');
+    if (el === null) return;
+    closePicker();
+    if (el.getAttribute('data-tutorial') === '1') {
+      void switchToTutorial();
+      return;
+    }
+    const kind = el.getAttribute('data-kind');
+    const name = el.getAttribute('data-name');
+    if (kind !== null && name !== null) void switchTo(kind, name);
+  });
+}
+
+// ---- map loading (M3b: tutorial default + any scanned map) ------------------
+/** Per-load state reset; atlases, defines and sprite lookups survive a map switch. */
+function resetMapState(): void {
+  world = null;
+  staticHouses = [];
+  staticUnits = [];
+  mission = null;
+  loadedMap = null;
+  baseTerrain = null;
+  mapInfo = null;
+  mapSource = null;
+  mapRev = 0;
+  mapRemake = false;
+  objTiles = [];
+  prevObj = new Map();
+  falling = new Map();
+  scannedTick = -1;
+  objOverride = new Map();
+  mapObjectTiles = [];
+  roadTiles = new Set();
+  digTiles = new Map();
+  moves = new Map();
+  pendingOrders = [];
+  speedCache = new Map();
+  selectedUid = 0;
+  selectedHouseUid = 0;
+  hoverX = -1;
+  hoverY = -1;
+  acc = 0;
+}
+
+/** Build the VBOs + camera for the freshly installed map; a good load clears the error box. */
+function finishLoad(): void {
+  buildTerrainVbo(tilesByI);
+  buildOverlayVbo();
+  viewW = cv.clientWidth;
+  viewH = cv.clientHeight;
+  resetView();
+  errBox.textContent = '';
+  updateHud();
+}
+
+/** Mission houses as viewer entities (the shape the economy world builds; no wares/workers). */
+function buildStaticHouses(m: Mission): EconHouse[] {
+  const out: EconHouse[] = [];
+  let uid = 1;
+  for (const mh of m.houses) {
+    const spec = houseSpecs[mh.typeId];
+    out.push({
+      uid: uid++,
+      typeId: mh.typeId,
+      owner: mh.owner,
+      x: mh.x,
+      y: mh.y,
+      entrance: { x: mh.x + (spec !== undefined ? spec.entranceDx : 0), y: mh.y },
+      state: 'empty',
+      wareIn: [0, 0, 0, 0],
+      wareOut: [0, 0, 0, 0],
+      workerUid: 0,
+      animStep: 0,
+      workAnimStep: 0,
+    });
+  }
+  return out;
+}
+
+/** Mission humanoid units as static viewer entities (animals stay parsed-only, M3 spec 2.1). */
+function buildStaticUnits(m: Mission): EconUnit[] {
+  const out: EconUnit[] = [];
+  let uid = 1;
+  for (const mu of m.units) {
+    if (mu.owner < 0) continue;
+    if (mu.typeId < 0 || mu.typeId >= specs.length) continue;
+    out.push({
+      uid: uid++,
+      owner: mu.owner,
+      type: mu.typeId,
+      posF: { x: mu.x, y: mu.y },
+      dir: 0,
+      animStep: 0,
+      action: 'stay',
+      carry: -1,
+      inside: false,
+      homeUid: 0,
+      taskKind: 'none',
+    });
+  }
+  return out;
+}
+
+/** The Town Tutorial: the frozen M1 export + the real mission, economy world + demo scenario. */
+async function loadTutorial(): Promise<void> {
+  const token = ++loadToken;
+  resetMapState();
+  const [mapData, missionBuf] = await Promise.all([
+    fetchJson<MapJson>('/out/maps/TownTutorial.json'),
+    fetchBytes('/mission/TownTutorial.dat'),
+  ]);
+  if (token !== loadToken) return;
+  const tileBytes = base64ToBytes(mapData.tiles);
+  map = { file: mapData.file, mapX: mapData.mapX, mapY: mapData.mapY };
+  tiles = tileBytes;
+  mission = parseMissionScript(missionBuf, mapData.mapX, mapData.mapY);
+
+  // Road overlay tiles: mission.streets are map coords (spec 2.1: SET_STREET places (x+1, y+1)).
+  const stride = mapData.mapX + 1;
+  for (const st of mission.streets) roadTiles.add(st.y * stride + st.x);
+  buildMapObjectTiles(false);
+
+  const n = mapData.mapX * mapData.mapY;
+  const kaMap = {
+    file: mapData.file,
+    mapX: mapData.mapX,
+    mapY: mapData.mapY,
+    tiles: tileBytes,
+    remake: false,
+    rev: 0,
+    overlay: new Uint8Array(n),
+    layers: new Uint8Array(n),
+    layerBytes: null,
+    tail: { resHead: null, mapEdChunk: false, tailBytes: 0 },
+  } as KaMap;
+  world = createEconomyWorld({ map: kaMap, tiles: tileFlags, elems, unitSpecs: specs, serfCarry, houseSpecs, mission });
+  applyDemoScenario(world);
+
+  // M2b compat shim: SimUnit.speed on the live units for the CDP hooks (the frozen EconUnit has no
+  // speed field; a field the sim owns is never overwritten).
+  for (const u of world.units) {
+    const holder = u as unknown as Record<string, unknown>;
+    if (holder['speed'] === undefined) holder['speed'] = speedsFor(u.type);
+  }
+
+  finishLoad();
+  ensureScan();
+  jumpToVillage(1); // boot into the economy village (hand 1); R fits the whole map again
+}
+
+/** Any scanned map: terrain + the mission's houses/units/streets as-is (no economy world). */
+async function loadScannedMap(kind: string, name: string): Promise<void> {
+  const token = ++loadToken;
+  resetMapState();
+  const base = `/mapfile/${encodeURIComponent(kind)}/${encodeURIComponent(name)}`;
+  const [mapBuf, datBuf] = await Promise.all([fetchBytes(`${base}/map`), fetchBytes(`${base}/dat`)]);
+  if (token !== loadToken) return;
+  const lm = parseMapBytes(mapBuf, `${kind}/${name}`);
+  loadedMap = lm;
+  map = { file: `${name}.map`, mapX: lm.mapX, mapY: lm.mapY };
+  tiles = lm.tiles;
+  baseTerrain = lm.baseTerrain;
+  mapRev = lm.rev;
+  mapRemake = lm.remake;
+  mapSource = { kind, name };
+  mapInfo = mapList.find((m) => m.kind === kind && m.name === name) ?? null;
+  mission = parseMissionScript(datBuf, lm.mapX, lm.mapY);
+
+  // Stored overlays (Remake maps): toRoad joins the mission streets in the road set, toDig1..4
+  // become the plain dig sprites (spec section 5; standard maps carry all-zero overlays).
+  const stride = lm.mapX + 1;
+  for (let ty = 1; ty <= lm.mapY; ty++) {
+    for (let tx = 1; tx <= lm.mapX; tx++) {
+      const ov = lm.overlay[(ty - 1) * lm.mapX + (tx - 1)]!;
+      if (ov === 5) roadTiles.add(ty * stride + tx);
+      else if (ov >= 1 && ov <= 4) digTiles.set(ty * stride + tx, ov);
+    }
+  }
+  for (const st of mission.streets) roadTiles.add(st.y * stride + st.x);
+  buildMapObjectTiles(true);
+  staticHouses = buildStaticHouses(mission);
+  staticUnits = buildStaticUnits(mission);
+  finishLoad();
+}
+
+function setUrlMap(kind: string | null, name: string | null): void {
+  const u = new URL(location.href);
+  if (kind === null || name === null) {
+    u.searchParams.delete('kind');
+    u.searchParams.delete('name');
+  } else {
+    u.searchParams.set('kind', kind);
+    u.searchParams.set('name', name);
+  }
+  history.replaceState(null, '', u.toString());
+}
+
+async function switchTo(kind: string, name: string): Promise<void> {
+  try {
+    await loadScannedMap(kind, name);
+    setUrlMap(kind, name);
+  } catch (err) {
+    showError(err);
+  }
+}
+
+async function switchToTutorial(): Promise<void> {
+  try {
+    await loadTutorial();
+    setUrlMap(null, null);
+  } catch (err) {
+    showError(err);
+  }
+}
+
 // ---- test hook (the CDP proof script drives the page through it) ------------
 function installHook(): void {
   const hook = {
     TICK_MS,
-    world,
+    get world() {
+      return world;
+    },
     tick: () => (world === null ? -1 : world.tickCount),
-    units: () => (world === null ? [] : world.units),
-    unitOf: (uid: number) => (world === null ? null : world.units.find((u) => u.uid === uid) ?? null),
-    houses: () => (world === null ? [] : world.houses),
-    houseOf: (uid: number) => (world === null ? null : world.houses.find((h) => h.uid === uid) ?? null),
+    units: () => activeUnits(),
+    unitOf: (uid: number) => activeUnits().find((u) => u.uid === uid) ?? null,
+    houses: () => activeHouses(),
+    houseOf: (uid: number) => activeHouses().find((h) => h.uid === uid) ?? null,
     counts: () => counts(),
     /** Fast-forward the world n ticks and return the fresh counters (acceptance hook). */
     fastForward: (n: number) => {
-      if (world === null) return null;
+      if (world === null) return counts(); // static map: nothing to step
       const steps = Math.max(0, Math.min(1_000_000, Math.floor(n)));
       for (let i = 0; i < steps; i++) world.tick();
       ensureScan();
@@ -1499,7 +1917,7 @@ function installHook(): void {
       hoverY = -1;
     },
     speedOf: (uid: number) => {
-      const u = world === null ? undefined : world.units.find((v) => v.uid === uid);
+      const u = activeUnits().find((v) => v.uid === uid);
       return u === undefined ? null : speedsFor(u.type);
     },
     walkOf: (uid: number) => moves.get(uid) ?? null,
@@ -1507,8 +1925,8 @@ function installHook(): void {
     /** Stump tiles the viewer is drawing (obj = the stump object id). */
     stumps: () => {
       const out: { x: number; y: number; obj: number }[] = [];
-      if (world === null) return out;
-      const stride = world.grid.mapX + 1;
+      if (map === null) return out;
+      const stride = map.mapX + 1;
       for (const idx of objTiles) {
         const obj = objAt(idx);
         if (!STUMP_OBJS.has(obj)) continue;
@@ -1520,8 +1938,8 @@ function installHook(): void {
     /** Falling-tree entities the viewer is drawing (fallObj + start tick). */
     fallingTiles: () => {
       const out: { x: number; y: number; fallObj: number; start: number }[] = [];
-      if (world === null) return out;
-      const stride = world.grid.mapX + 1;
+      if (map === null) return out;
+      const stride = map.mapX + 1;
       for (const [idx, f] of falling) {
         const x = idx % stride;
         out.push({ x, y: (idx - x) / stride, fallObj: f.fallObj, start: f.start });
@@ -1529,7 +1947,9 @@ function installHook(): void {
       return out;
     },
     roadTiles: () => roadTiles.size,
-    roadQuads: () => roadIndexCount / 6,
+    roadQuads: () => roadQuadCount,
+    digTiles: () => digTiles.size,
+    digQuads: () => digQuadCount,
     /** World px -> viewport css px (what CDP Input.dispatchMouseEvent wants). */
     viewportOf: (wx: number, wy: number) => {
       const r = cv.getBoundingClientRect();
@@ -1538,7 +1958,7 @@ function installHook(): void {
     },
     /** Unit sprite centre -> viewport css px, or null when it has no sprite. */
     viewportOfUnit: (uid: number) => {
-      const u = world === null ? undefined : world.units.find((x) => x.uid === uid);
+      const u = activeUnits().find((x) => x.uid === uid);
       if (u === undefined) return null;
       const p = unitSpriteCenterScreen(u);
       if (p === null) return null;
@@ -1554,17 +1974,49 @@ function installHook(): void {
     findPath: (from: { x: number; y: number }, to: { x: number; y: number }) =>
       world === null ? null : findPath(world.grid, from, to),
     spriteOf: (uid: number) => {
-      const u = world === null ? undefined : world.units.find((x) => x.uid === uid);
+      const u = activeUnits().find((x) => x.uid === uid);
       return u === undefined ? null : unitSprite(u) ?? null;
     },
+    // ---- M3b hooks (the picker + any-map CDP proof) --------------------------
+    /** Current map: source (null = tutorial), size, format, and the readable entity/overlay counts. */
+    mapInfo: () =>
+      map === null
+        ? null
+        : {
+            source: mapSource,
+            file: map.file,
+            mapX: map.mapX,
+            mapY: map.mapY,
+            remake: mapRemake,
+            rev: mapRev,
+            mode: world === null ? 'static' : 'economy',
+            houses: activeHouses().length,
+            units: activeUnits().length,
+            missionUnits: mission === null ? 0 : mission.units.length,
+            animals: mission === null ? 0 : mission.units.filter((u) => u.owner < 0).length,
+            roads: roadTiles.size,
+            digs: digTiles.size,
+            overlayTiles: loadedMap === null ? 0 : loadedMap.overlay.reduce((n, v) => n + (v !== 0 ? 1 : 0), 0),
+            layers: loadedMap === null ? 0 : loadedMap.layers.reduce((n, v) => n + (v > 0 ? 1 : 0), 0),
+            tailBytes: loadedMap === null ? 0 : loadedMap.tail.tailBytes,
+            loaded: loadToken,
+          },
+    pickerOpen: () => !pickerEl.classList.contains('closed'),
+    pickerMaps: () => mapList.length,
+    pickerToggle: () => togglePicker(),
+    pickerFilter: (q: string) => {
+      filterEl.value = q;
+      renderPickerList();
+    },
+    loadMap: (kind: string, name: string) => switchTo(kind, name),
+    loadTutorial: () => switchToTutorial(),
   };
   (window as unknown as Record<string, unknown>).__kamplay = hook;
 }
 
 // ---- boot -------------------------------------------------------------------
 async function boot(): Promise<void> {
-  const [mapData, tilesetData, unitsData, housesData, treesData, tilesText, mapelemBuf, unitdatBuf, housesBuf, missionBuf] = await Promise.all([
-    fetchJson<MapJson>('/out/maps/TownTutorial.json'),
+  const [tilesetData, unitsData, housesData, treesData, tilesText, mapelemBuf, unitdatBuf, housesBuf, mapsJson] = await Promise.all([
     fetchJson<Atlas>('/out/atlas/Tileset.json'),
     fetchJson<Atlas>('/out/atlas/Units.json'),
     fetchJson<Atlas>('/out/atlas/Houses.json'),
@@ -1573,15 +2025,13 @@ async function boot(): Promise<void> {
     fetchBytes('/defines/mapelem.dat'),
     fetchBytes('/defines/unit.dat'),
     fetchBytes('/defines/houses.dat'),
-    fetchBytes('/mission/TownTutorial.dat'),
+    fetchJson<MapInfoView[]>('/maps'),
   ]);
 
-  map = mapData;
   atlas = tilesetData;
   unitsAtlas = unitsData;
   housesAtlas = housesData;
   treesAtlas = treesData;
-  tiles = base64ToBytes(mapData.tiles);
 
   specs = parseUnitDat(unitdatBuf);
   serfCarry = parseSerfCarry(unitdatBuf);
@@ -1591,39 +2041,10 @@ async function boot(): Promise<void> {
   const supply = parseSupplyTables(housesBuf);
   supplyIn = supply.in;
   supplyOut = supply.out;
-  mission = parseMissionScript(missionBuf, mapData.mapX, mapData.mapY);
-  const tileFlags = parseTilesJson(tilesText);
-
-  // Road overlay tiles: mission.streets are map coords (spec 2.1: SET_STREET places (x+1, y+1)).
-  const stride = mapData.mapX + 1;
-  roadTiles = new Set<number>();
-  for (const st of mission.streets) roadTiles.add(st.y * stride + st.x);
-
-  // Object tiles of the raw map (the defensive treeAt fallback of scanObjects uses this list).
-  mapObjectTiles = [];
-  for (let y = 1; y <= mapData.mapY; y++) {
-    for (let x = 1; x <= mapData.mapX; x++) {
-      if (tiles[((y - 1) * mapData.mapX + (x - 1)) * 4 + 3] !== OBJ_NONE) mapObjectTiles.push(y * stride + x);
-    }
-  }
-
-  const kaMap: KaMap = {
-    file: mapData.file,
-    mapX: mapData.mapX,
-    mapY: mapData.mapY,
-    tiles,
-    remake: false,
-    tail: { resHead: null, mapEdChunk: false, tailBytes: 0 },
-  };
-  world = createEconomyWorld({ map: kaMap, tiles: tileFlags, elems, unitSpecs: specs, serfCarry, houseSpecs, mission });
-  applyDemoScenario(world);
-
-  // M2b compat shim: SimUnit.speed on the live units for the CDP hooks (the frozen EconUnit has no
-  // speed field; a field the sim owns is never overwritten).
-  for (const u of world.units) {
-    const holder = u as unknown as Record<string, unknown>;
-    if (holder['speed'] === undefined) holder['speed'] = speedsFor(u.type);
-  }
+  tileFlags = parseTilesJson(tilesText);
+  mapList = mapsJson
+    .slice()
+    .sort((a, b) => (a.kind === b.kind ? a.name.localeCompare(b.name) : a.kind === 'Maps' ? -1 : 1));
 
   sheetTex = await Promise.all(tilesetData.sheets.map((s) => loadTexture(`/out/atlas/${s.file}`)));
   unitTex = await Promise.all(unitsData.sheets.map((s) => loadTexture(`/out/atlas/${s.file}`)));
@@ -1641,16 +2062,24 @@ async function boot(): Promise<void> {
   tilesByI = new Map();
   for (const sp of tilesetData.sprites) tilesByI.set(sp.i, sp);
 
-  buildTerrainVbo(tilesByI);
-  buildRoadVbo();
   buildQuad();
   ringTex = buildRingTexture();
+  bindPicker();
 
-  viewW = cv.clientWidth;
-  viewH = cv.clientHeight;
-  resetView();
-  ensureScan();
-  jumpToVillage(1); // boot into the economy village (hand 1); R fits the whole map again
+  const params = new URLSearchParams(location.search);
+  const kind = params.get('kind');
+  const name = params.get('name');
+  if (kind !== null && name !== null) {
+    try {
+      await loadScannedMap(kind, name);
+    } catch (err) {
+      showError(err);
+      await loadTutorial();
+    }
+  } else {
+    await loadTutorial();
+  }
+
   bindInput();
   installHook();
   lastFrame = performance.now();

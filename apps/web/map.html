@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>kam-web M1 — Town Tutorial terrain</title>
+<title>kam-web M1/M3b — map terrain</title>
 <style>
   html, body { margin: 0; height: 100%; overflow: hidden; background: #202830; color: #cfd8e3;
                font: 13px/1.4 ui-monospace, Consolas, monospace; }
@@ -12,13 +12,37 @@
   #err { position: fixed; left: 10px; top: 8px; color: #ff7d7d; white-space: pre-wrap; }
   canvas { display: block; width: 100vw; height: 100vh; cursor: grab; }
   canvas.drag { cursor: grabbing; }
+  #picker { position: fixed; left: 12px; top: 12px; width: min(600px, 72vw); max-height: 72vh;
+            display: flex; flex-direction: column; background: #1b222b; border: 1px solid #3a4653;
+            border-radius: 6px; box-shadow: 0 8px 28px #000b; z-index: 10; }
+  #picker.closed { display: none; }
+  #pickertop { display: flex; gap: 8px; align-items: center; padding: 8px 10px; border-bottom: 1px solid #3a4653; }
+  #pickertitle { opacity: .8; }
+  #filter { flex: 1; min-width: 120px; background: #10151b; color: #cfd8e3; border: 1px solid #3a4653;
+            border-radius: 4px; padding: 4px 6px; font: inherit; }
+  #pickercount { opacity: .6; }
+  #pickerlist { overflow: auto; }
+  button.maprow { display: block; width: 100%; text-align: left; background: none; border: 0;
+                  border-bottom: 1px solid #232c36; color: #cfd8e3; font: inherit;
+                  padding: 6px 10px; cursor: pointer; }
+  button.maprow:hover { background: #2a3644; }
+  button.maprow .dim { opacity: .6; margin-left: 6px; }
+  button.maprow.tutorial { color: #9fd3a0; }
 </style>
 </head>
 <body>
 <canvas id="cv"></canvas>
 <div id="hud"></div>
-<div id="hint">drag pan &#183; wheel zoom &#183; R reset &#183; <a href="/">sprite viewer</a></div>
+<div id="hint">drag pan &#183; wheel zoom &#183; R reset &#183; M map picker &#183; <a href="/">sprite viewer</a> &#183; <a href="/play.html">play</a></div>
 <div id="err"></div>
+<div id="picker" class="closed">
+  <div id="pickertop">
+    <span id="pickertitle">maps</span>
+    <input id="filter" type="text" placeholder="filter by name..." spellcheck="false" autocomplete="off">
+    <span id="pickercount"></span>
+  </div>
+  <div id="pickerlist"></div>
+</div>
 <script type="module" src="/apps/web/mapdemo.js"></script>
 </body>
 </html>

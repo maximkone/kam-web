@@ -235,3 +235,21 @@ flags (`SetCoop`, `PlayableAsSP`, …) — line-oriented, UTF-8 with ANSI fallba
   packed raw payloads in tile order; `LayersCnt > 3` throws; `maplist.ts` uses `node:fs`
   (server-side only — the browser viewer keeps its own reader; consolidating the browser-safe core
   out of `map.ts` is a follow-up refactor).
+
+### 7.2 Worker H — map picker + viewer loading: accepted
+
+- `npx tsc --noEmit` exit 0; `node apps/web/serve.ts --check` → `SERVE CHECK PASS (…, maps=243)`;
+  H's own CDP runs: 43/43 + 6/6, plus worker F's M3 script 29/29 against H's server.
+- Lead's independent run (`%TEMP%\opencode\kamweb_m3b_leadcdp.mjs`, live server on 8142):
+  **RESULT PASS pass=21 fail=0** — `/maps` = 243 entries; Arena metadata (32×32, Remake r12485,
+  7 players); **traversal route refused (404)** and bad extension refused; Arena `.map`/`.dat`
+  served; Arena loads (7 mission serfs, 0 missing sprites, Remake); Atoll (standard + XOR-239 `.dat`)
+  loads; Center Castle Looting (256×256, 8,747 layered tiles, 264 overlay tiles = 9 roads + 255
+  digs) loads with 24 houses / 128 humanoids drawn; the tutorial reload keeps the M3 counters
+  (21/34/159/30); 0 blocked requests; no page exceptions; screenshots.
+- Accepted deviations (H's flags): the viewer keeps its own browser-side reader
+  (`apps/web/mapread.ts`, 226 lines) because `packages/map/map.ts` imports `node:fs` —
+  **dedupe follow-up: give the parser a browser-safe `Uint8Array` entry and point `mapread.ts` at
+  it**; `baseTerrain` used for rendering (ids > 255); animals parsed-only, not drawn; `map.html`
+  draws stored overlays only (no mission streets); layered tiles render the base layer; a failed map
+  switch keeps the old terrain with the error in `#err`.

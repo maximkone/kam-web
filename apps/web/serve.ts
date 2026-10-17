@@ -12,11 +12,19 @@
 // /packages/<dir>/<name>.js. /defines/{tiles.json,mapelem.dat,unit.dat,houses.dat} come from KAM_DATA
 // (default: the r15472 install; docs/M2B-SPIKE.md section 2.8); /mission/TownTutorial.dat (raw bytes)
 // comes from KAM_MISSION (docs/M3-SPIKE.md section 5).
+//
+// M3b (docs/M3B-SPIKE.md section 3): at startup scanMapFolders walks <KAM_INSTALL>/Maps + MapsMP
+// (KAM_INSTALL overrides; default the r15472 install). /maps serves the scanned MapInfo[] JSON and
+// /mapfile/<kind>/<name>/<map|dat|txt> serves one scanned entry's file — the path always comes from
+// the scan result, user input is never path-joined. The viewers' own module graphs (play, mapdemo)
+// are emitted under out/web/apps/web/ and their shared browser module apps/web/mapread.js too.
 import { createServer } from 'node:http';
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { scanMapFolders } from '../../packages/map/maplist.ts';
+import type { MapInfo } from '../../packages/map/maplist.ts';
 
 const HERE = fileURLToPath(import.meta.url);
 const ROOT = resolve(HERE, '..', '..', '..');
@@ -27,14 +35,21 @@ const TSC = join(ROOT, 'node_modules', 'typescript', 'bin', 'tsc');
 const WEB_JS_ROUTE = /^\/apps\/web\/([A-Za-z0-9_-]+)\.js$/;
 const MODULE_ROUTE = /^\/packages\/(sim|assets|mission)\/([A-Za-z0-9_-]+)\.js$/;
 const DEFINES_ROUTE = /^\/defines\/(tiles\.json|mapelem\.dat|unit\.dat|houses\.dat)$/;
+const MAPFILE_ROUTE = /^\/mapfile\/([^/]+)\/([^/]+)\/(map|dat|txt)$/;
 const DEFINES_DIR = process.env.KAM_DATA ?? 'C:\\Users\\me\\Desktop\\KaM Remake\\KaM Remake Beta r15472\\data\\defines';
 const MISSION_PATH = process.env.KAM_MISSION ?? 'C:\\Users\\me\\Desktop\\KaM Remake\\Tutorials\\Town Tutorial\\Town Tutorial.dat';
+const INSTALL_DIR = process.env.KAM_INSTALL ?? 'C:\\Users\\me\\Desktop\\KaM Remake\\KaM Remake Beta r15472';
+const MAP_ROOTS = [
+  { kind: 'Maps', dir: join(INSTALL_DIR, 'Maps') },
+  { kind: 'MapsMP', dir: join(INSTALL_DIR, 'MapsMP') },
+];
 
 // The play module graph: play.ts plus every file it imports (keep in sync with apps/web/play.ts).
 const PLAY_ENTRY = 'apps/web/play.ts';
 const PLAY_OUT = join(WEB_JS_DIR, 'apps', 'web', 'play.js');
 const PLAY_MODULES = [
   'apps/web/play.ts',
+  'apps/web/mapread.ts',
   'packages/assets/tiledata.ts',
   'packages/assets/mapelem.ts',
   'packages/assets/unitdat.ts',
@@ -48,6 +63,22 @@ const PLAY_MODULES = [
   'packages/sim/sim.ts',
   'packages/sim/rng.ts',
   'packages/sim/economy.ts',
+];
+
+// The terrain viewer's graph: mapdemo.ts + the shared browser map reader.
+const MAPDEMO_ENTRY = 'apps/web/mapdemo.ts';
+const MAPDEMO_OUT = join(WEB_JS_DIR, 'apps', 'web', 'mapdemo.js');
+const MAPDEMO_MODULES = ['apps/web/mapdemo.ts', 'apps/web/mapread.ts'];
+
+interface Graph {
+  entry: string;
+  out: string;
+  modules: string[];
+}
+
+const GRAPHS: Graph[] = [
+  { entry: PLAY_ENTRY, out: PLAY_OUT, modules: PLAY_MODULES },
+  { entry: MAPDEMO_ENTRY, out: MAPDEMO_OUT, modules: MAPDEMO_MODULES },
 ];
 
 const MIME: Record<string, string> = {
@@ -79,6 +110,25 @@ function listPacks(): string[] {
   }
 }
 
+// ---- M3b map scan (docs/M3B-SPIKE.md section 3): once at startup, whitelist only ----
+let mapList: MapInfo[] = [];
+let mapIndex = new Map<string, MapInfo>();
+try {
+  mapList = scanMapFolders(MAP_ROOTS);
+  mapIndex = new Map(mapList.map((m) => [`${m.kind}/${m.name}`, m]));
+} catch (err) {
+  console.error(`serve: map scan failed (${err instanceof Error ? err.message : String(err)}); /maps stays empty`);
+}
+
+/** Resolve /mapfile/<kind>/<name>/<what> against the scan result; null when not whitelisted. */
+function resolveMapFile(kind: string, name: string, what: string): string | null {
+  const info = mapIndex.get(`${kind}/${name}`);
+  if (info === undefined) return null;
+  const path = what === 'map' ? info.mapPath : what === 'dat' ? info.datPath : info.txtPath;
+  if (path === null || path === undefined || !existsSync(path)) return null;
+  return path;
+}
+
 function send(res: import('node:http').ServerResponse, status: number, type: string, body: string | Buffer): void {
   res.writeHead(status, { 'content-type': type, 'cache-control': 'no-store' });
   res.end(body);
@@ -102,25 +152,33 @@ function buildWebJs(name: string): string {
   return readFileSync(jsPath, 'utf8');
 }
 
-/** Build the M2b play module graph (play.ts + packages/{assets,sim}/*.ts) when stale. One tsc run
- *  emits out/web/apps/web/play.js + the module tree under out/web/packages with .ts import
- *  specifiers rewritten to .js (--rewriteRelativeImportExtensions; proven in the M2b spike scratch). */
-function buildPlayGraph(): void {
-  const stale = !existsSync(PLAY_OUT) || PLAY_MODULES.some((rel) => {
+/** Build one viewer module graph when stale (single tsc run; --rewriteRelativeImportExtensions
+ *  turns the .ts import specifiers into .js for the browser, proven in the M2b spike scratch). */
+function buildGraph(g: Graph): void {
+  const stale = !existsSync(g.out) || g.modules.some((rel) => {
     const src = join(ROOT, rel);
     // A missing source counts as stale too, so the tsc run surfaces it instead of serving an old build.
-    return !existsSync(src) || statSync(src).mtimeMs > statSync(PLAY_OUT).mtimeMs;
+    return !existsSync(src) || statSync(src).mtimeMs > statSync(g.out).mtimeMs;
   });
   if (!stale) return;
   const r = spawnSync(
     process.execPath,
-    [TSC, PLAY_ENTRY, '--ignoreConfig', '--target', 'es2022', '--module', 'esnext', '--types', 'node',
+    [TSC, g.entry, '--ignoreConfig', '--target', 'es2022', '--module', 'esnext', '--types', 'node',
       '--rootDir', ROOT, '--outDir', WEB_JS_DIR, '--rewriteRelativeImportExtensions'],
     { cwd: ROOT, encoding: 'utf8' },
   );
-  if (r.status !== 0 || !existsSync(PLAY_OUT)) {
-    throw new Error(`tsc play graph failed (exit ${r.status}): ${r.stdout}${r.stderr}`);
+  if (r.status !== 0 || !existsSync(g.out)) {
+    throw new Error(`tsc ${g.entry} failed (exit ${r.status}): ${r.stdout}${r.stderr}`);
   }
+}
+
+function buildGraphs(): void {
+  for (const g of GRAPHS) buildGraph(g);
+}
+
+/** The graph that emits out/web/apps/web/<name>.js for a non-entry module (e.g. mapread). */
+function graphForModule(name: string): Graph | null {
+  return GRAPHS.find((g) => g.modules.includes(`apps/web/${name}.ts`)) ?? null;
 }
 
 const server = createServer((req, res) => {
@@ -134,6 +192,25 @@ const server = createServer((req, res) => {
 
   if (path === '/api/packs') {
     send(res, 200, MIME['.json']!, JSON.stringify(listPacks()));
+    return;
+  }
+
+  // M3b: the scanned map list (MapInfo[]), built once at startup.
+  if (path === '/maps') {
+    send(res, 200, MIME['.json']!, JSON.stringify(mapList));
+    return;
+  }
+
+  // M3b: one scanned map's raw files. The path comes from the whitelist only.
+  const mapFile = path.match(MAPFILE_ROUTE);
+  if (mapFile !== null) {
+    const abs = resolveMapFile(mapFile[1]!, mapFile[2]!, mapFile[3]!);
+    if (abs === null) {
+      send(res, 404, 'text/plain; charset=utf-8', `not found: ${path} (not a scanned map file)`);
+      return;
+    }
+    const type = mapFile[3] === 'txt' ? 'text/plain; charset=utf-8' : MIME['.map']!;
+    send(res, 200, type, readFileSync(abs));
     return;
   }
 
@@ -159,11 +236,11 @@ const server = createServer((req, res) => {
     return;
   }
 
-  // Browser modules of the play graph, emitted under out/web/packages/... by buildPlayGraph.
+  // Browser modules of the play graph, emitted under out/web/packages/... by buildGraph.
   const mod = path.match(MODULE_ROUTE);
   if (mod !== null) {
     try {
-      buildPlayGraph();
+      buildGraphs();
       const abs = join(WEB_JS_DIR, 'packages', mod[1], `${mod[2]}.js`);
       if (!existsSync(abs)) {
         send(res, 404, 'text/plain; charset=utf-8', `not found: ${path}`);
@@ -179,12 +256,29 @@ const server = createServer((req, res) => {
   const webJs = path.match(WEB_JS_ROUTE);
   if (webJs !== null) {
     const name = webJs[1];
-    if (name === 'play') {
+    const graph = GRAPHS.find((g) => g.entry === `apps/web/${name}.ts`) ?? null;
+    if (graph !== null) {
       try {
-        buildPlayGraph();
-        send(res, 200, MIME['.js']!, readFileSync(PLAY_OUT));
+        buildGraph(graph);
+        send(res, 200, MIME['.js']!, readFileSync(graph.out));
       } catch (err) {
-        send(res, 500, 'text/plain; charset=utf-8', `apps/web/play.js build failed: ${err instanceof Error ? err.message : String(err)}`);
+        send(res, 500, 'text/plain; charset=utf-8', `apps/web/${name}.js build failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      return;
+    }
+    // A non-entry module emitted by a graph build (e.g. mapread.js) lives under out/web/apps/web/.
+    const owner = graphForModule(name);
+    if (owner !== null) {
+      try {
+        buildGraph(owner);
+        const abs = join(WEB_JS_DIR, 'apps', 'web', `${name}.js`);
+        if (!existsSync(abs)) {
+          send(res, 404, 'text/plain; charset=utf-8', `not found: ${path}`);
+          return;
+        }
+        send(res, 200, MIME['.js']!, readFileSync(abs));
+      } catch (err) {
+        send(res, 500, 'text/plain; charset=utf-8', `apps/web/${name}.js build failed: ${err instanceof Error ? err.message : String(err)}`);
       }
       return;
     }
@@ -224,13 +318,13 @@ const server = createServer((req, res) => {
   send(res, 200, type, readFileSync(abs));
 });
 
-/** --check: build the play graph and verify every route's backing file, without listening. */
+/** --check: build both viewer graphs and verify every route's backing file, without listening. */
 function check(): void {
   const fails: string[] = [];
   try {
-    buildPlayGraph();
+    buildGraphs();
   } catch (err) {
-    fails.push(`play graph: ${err instanceof Error ? err.message : String(err)}`);
+    fails.push(`viewer graphs: ${err instanceof Error ? err.message : String(err)}`);
   }
   const files: [string, string][] = [
     ['play.html', join(WEB_TS_DIR, 'play.html')],
@@ -251,17 +345,28 @@ function check(): void {
     ['out/web/packages/assets/housedata.js', join(WEB_JS_DIR, 'packages', 'assets', 'housedata.js')],
     ['out/web/packages/assets/wares.js', join(WEB_JS_DIR, 'packages', 'assets', 'wares.js')],
     ['out/web/packages/sim/economy.js', join(WEB_JS_DIR, 'packages', 'sim', 'economy.js')],
+    // M3b: the viewer graphs + the shared browser map reader.
+    ['out/web/apps/web/play.js', PLAY_OUT],
+    ['out/web/apps/web/mapdemo.js', MAPDEMO_OUT],
+    ['out/web/apps/web/mapread.js', join(WEB_JS_DIR, 'apps', 'web', 'mapread.js')],
   ];
   for (const [label, abs] of files) {
     if (!existsSync(abs)) fails.push(`missing ${label} (${abs})`);
   }
-  if (!existsSync(PLAY_OUT)) fails.push(`missing ${PLAY_OUT}`);
+
+  // M3b: the scan + a sample map/dat route lookup (the same resolver the server uses).
+  if (mapList.length === 0) fails.push(`map scan found no maps (KAM_INSTALL=${INSTALL_DIR})`);
+  const sampleMap = resolveMapFile('MapsMP', 'Arena', 'map');
+  const sampleDat = resolveMapFile('MapsMP', 'Arena', 'dat');
+  if (sampleMap === null) fails.push('sample route /mapfile/MapsMP/Arena/map did not resolve');
+  if (sampleDat === null) fails.push('sample route /mapfile/MapsMP/Arena/dat did not resolve');
+
   if (fails.length > 0) {
     console.log(`SERVE CHECK FAIL: ${fails.join('; ')}`);
     process.exitCode = 1;
     return;
   }
-  console.log(`SERVE CHECK PASS (defines=${DEFINES_DIR}, play=${PLAY_OUT})`);
+  console.log(`SERVE CHECK PASS (defines=${DEFINES_DIR}, play=${PLAY_OUT}, maps=${mapList.length})`);
 }
 
 const argv = process.argv.slice(2);
@@ -270,6 +375,6 @@ if (argv.includes('--check')) {
 } else {
   const port = parsePort(argv);
   server.listen(port, '127.0.0.1', () => {
-    console.log(`serve: http://127.0.0.1:${port}/ root=${ROOT} packs=${listPacks().join(',') || '(none)'}`);
+    console.log(`serve: http://127.0.0.1:${port}/ root=${ROOT} packs=${listPacks().join(',') || '(none)'} maps=${mapList.length}`);
   });
 }
