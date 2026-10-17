@@ -4,6 +4,11 @@ import { createSkirmish, step, skirmishStatus, humanHands } from '../../../packa
 import type { Skirmish, SkirmishSlot, SkirmishDefines, SkirmishStatus } from '../../../packages/sim/skirmish.ts';
 import { parseMapFileBytes } from '../../../packages/map/map.ts';
 import type { KaMap } from '../../../packages/map/map.ts';
+import { AI_START_LEVELS, isAiStartLevel } from '../../../packages/sim/aistart.ts';
+import type { AiStartLevel } from '../../../packages/sim/aistart.ts';
+import { createUi } from '../ui/ui.ts';
+import type { GameUi, PlayView } from '../ui/ui.ts';
+import { installGameTest } from '../ui/gametest.ts';
 
 const MAP_LIST_URL = '/maps';
 const TICK_MS = 100; // 10 ticks/s
@@ -25,6 +30,13 @@ let lastFrame = 0;
 let running = false;
 let startTimeMs = 0;
 let endScreenActive = false;
+let ui: GameUi | null = null; // B2A: the game UI (input router, panels, minimap, command queue)
+(window as any).__gameSk = (): Skirmish | null => sk; // debug/test: the running skirmish (tools/uicheck/b1.ts reads its AI slot)
+
+interface MatchSetup {
+  aiStart: AiStartLevel;
+  peaceMinutes: number;
+}
 
 // ---- DOM refs ----
 const setupEl = document.getElementById('setup')!;
@@ -32,6 +44,7 @@ const maplistEl = document.getElementById('maplist')!;
 const filterEl = document.getElementById('filter')! as HTMLInputElement;
 const slottbl = document.getElementById('slottbl')!;
 const startbtn = document.getElementById('startbtn')! as HTMLButtonElement;
+const peaceEl = document.getElementById('peace')! as HTMLSelectElement;
 const mapnameEl = document.getElementById('mapname')!;
 const tickEl = document.getElementById('tick')!;
 const timeEl = document.getElementById('time')!;
@@ -68,11 +81,17 @@ function escHtml(s: string): string {
 }
 
 function renderSlots(): void {
+  const levels = AI_START_LEVELS.map((l) => `<option value="${l}"${l === 'normal' ? ' selected' : ''}>${l}</option>`).join('');
   const rows = [
-    `<tr><td>0</td><td>Human</td><td>-</td><td>0</td><td>0</td></tr>`,
-    `<tr><td>1</td><td>AI (Advanced)</td><td>advanced</td><td>1</td><td>1</td></tr>`,
+    `<tr><td>0</td><td>Human</td><td>-</td><td>-</td><td>0</td><td>0</td></tr>`,
+    `<tr><td>1</td><td>AI (Advanced)</td><td>advanced</td><td><select id="aistart" aria-label="AI start">${levels}</select></td><td>1</td><td>1</td></tr>`,
   ];
   slottbl.innerHTML = rows.join('');
+}
+
+function readSetup(): MatchSetup {
+  const aiVal = (document.getElementById('aistart') as HTMLSelectElement).value;
+  return { aiStart: isAiStartLevel(aiVal) ? aiVal : 'normal', peaceMinutes: Number(peaceEl.value) };
 }
 
 // ---- Game loop ----
@@ -101,8 +120,9 @@ function startGame(kind: string, name: string): void {
       while (tickAcc >= TICK_MS && running && !paused && !endScreenActive) {
         tickAcc -= TICK_MS;
         if (sk !== null) {
-          const cmds = [] as any[]; // empty local queue for now; B2 will fill it
-          step(sk, cmds);
+          const cmds = ui !== null ? ui.takeCommands(sk.world.tickCount + 1) : [];
+          const res = step(sk, cmds);
+          if (ui !== null) ui.afterStep(res);
           stats.steps++;
         }
       }
@@ -111,6 +131,7 @@ function startGame(kind: string, name: string): void {
         if (st.matchOver) showEnd(st);
       }
     }
+    if (ui !== null) ui.frame(now);
     updateTop();
     requestAnimationFrame(loopFrame);
   })(performance.now());
@@ -125,16 +146,7 @@ function updateTop(): void {
   const s = sec % 60;
   timeEl.textContent = `${min}:${String(s).padStart(2, '0')}`;
   speedbtn.textContent = speedMult + 'x';
-  // Stock summary from world
-  const w = sk.world;
-  const hand = humanHands(sk)[0] ?? 0;
-  let trunks = 0, timber = 0;
-  for (const h of w.houses) {
-    if (h.typeId === 11 && h.owner === hand) { // store
-      trunks += w.wareCount(h, 1); // trunk
-    }
-  }
-  stockEl.textContent = `trunks=${trunks}`;
+  // the stock row is drawn by the game UI (ui/panels.ts renderStock)
 }
 
 function showEnd(st: SkirmishStatus): void {
@@ -167,7 +179,7 @@ startbtn.addEventListener('click', () => {
   if (!btn) return alert('Select a map first');
   const kind = btn.getAttribute('data-kind')!;
   const name = btn.getAttribute('data-name')!;
-  void initAndStart(kind, name);
+  void initAndStart(kind, name, readSetup());
 });
 
 maplistEl.addEventListener('click', (e) => {
@@ -188,6 +200,7 @@ backbtn.addEventListener('click', () => {
   setupEl.classList.remove('hide');
   running = false;
   sk = null;
+  if (ui !== null) ui.detach();
 });
 
 pausebtn.addEventListener('click', () => {
@@ -237,7 +250,7 @@ async function waitForHook(): Promise<any> {
 }
 
 // ---- Initialization ----
-async function initAndStart(kind: string, name: string): Promise<void> {
+async function initAndStart(kind: string, name: string, setup: MatchSetup): Promise<void> {
   const base = `/mapfile/${encodeURIComponent(kind)}/${encodeURIComponent(name)}`;
   const [mapBuf, datBuf] = await Promise.all([
     (await fetch(`${base}/map`)).arrayBuffer().then((b) => new Uint8Array(b)),
@@ -257,7 +270,7 @@ async function initAndStart(kind: string, name: string): Promise<void> {
 
   const slots: SkirmishSlot[] = [
     { hand: 0, kind: 'human' },
-    { hand: 1, kind: 'ai', aiLevel: 'advanced', color: 1 },
+    { hand: 1, kind: 'ai', aiLevel: 'advanced', aiStart: setup.aiStart, color: 1 },
   ];
 
   sk = createSkirmish({
@@ -267,6 +280,7 @@ async function initAndStart(kind: string, name: string): Promise<void> {
     defines,
     seed: 1,
     slots,
+    peaceMinutes: setup.peaceMinutes,
   });
 
   // Hook into the play renderer (wait for its async boot to finish)
@@ -275,6 +289,11 @@ async function initAndStart(kind: string, name: string): Promise<void> {
     const parsed = parseMapFileBytes(mapBuf, `${kind}/${name}`);
     hook.attachWorld(sk.world, parsed.map, 0);
     mapnameEl.textContent = `${kind}/${name}`;
+    if (ui === null) {
+      ui = createUi(hook as PlayView, document.getElementById('cv') as HTMLCanvasElement, document.getElementById('ov') as HTMLCanvasElement);
+      installGameTest({ sk: () => sk, hand: () => (sk === null ? 0 : humanHands(sk)[0] ?? 0), view: hook as PlayView, ui });
+    }
+    if (sk !== null) ui.attach(sk, parsed.map);
   } else {
     console.error('No renderer hook found (window.__kamplay.attachWorld)');
     alert('Renderer hook missing — game cannot render. Check play.js load.');

@@ -120,13 +120,16 @@ test('sizes grow with the level: light < normal < hard', () => {
   assert.ok(total(RICH_START_SIZES.normal) < total(RICH_START_SIZES.hard));
 });
 
-test('a bad level throws; no barracks spot or no room for the groups throws by name', () => {
+test('a bad level throws; no barracks spot starts without a barracks; no room for the groups throws by name', () => {
   assert.equal(isAiStartLevel('normal'), true);
   assert.equal(isAiStartLevel('expert'), false);
   const { world: w1 } = fakeWorld();
   assert.throws(() => applyRichStart(w1, 0, { level: 'expert' as never }), /level must be one of none, light, normal, hard/);
   const { world: w2 } = fakeWorld({ barracksFree: false });
-  assert.throws(() => applyRichStart(w2, 0, { level: 'light' }), /no barracks spot/);
+  const noBarracks = applyRichStart(w2, 0, { level: 'light' });
+  assert.equal(noBarracks?.barracksUid, -1);
+  assert.equal(noBarracks?.recruitsWaiting, 0);
+  assert.ok((noBarracks?.groupUids.length ?? 0) > 0);
   const { world: w3 } = fakeWorld({ walkable: false });
   assert.throws(() => applyRichStart(w3, 0, { level: 'light' }), /start groups fit/);
 });

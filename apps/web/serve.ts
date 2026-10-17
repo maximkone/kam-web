@@ -181,6 +181,35 @@ function buildGraphs(): void {
   for (const g of GRAPHS) buildGraph(g);
 }
 
+// The B1/B2 game graph (apps/web/game/game.ts and the apps/web/ui modules it imports). It is built once when stale,
+// like the viewer graphs: a tsc run per request blocked the one server thread for 4-30 s per module (measured).
+const GAME_ENTRY = 'apps/web/game/game.ts';
+const GAME_OUT = join(WEB_JS_DIR, 'apps', 'web', 'game', 'game.js');
+const GAME_SRC_DIRS = ['apps/web/game', 'apps/web/ui', 'packages/sim', 'packages/map', 'packages/assets', 'packages/mission'];
+
+/** Newest .ts mtime under a directory (relative to ROOT), recursive. */
+function newestTs(rel: string): number {
+  let newest = 0;
+  for (const ent of readdirSync(join(ROOT, rel), { withFileTypes: true })) {
+    const m = ent.isDirectory() ? newestTs(join(rel, ent.name)) : ent.name.endsWith('.ts') ? statSync(join(ROOT, rel, ent.name)).mtimeMs : 0;
+    if (m > newest) newest = m;
+  }
+  return newest;
+}
+
+function buildGameGraph(): void {
+  const stale = !existsSync(GAME_OUT) || GAME_SRC_DIRS.some((d) => newestTs(d) > statSync(GAME_OUT).mtimeMs);
+  if (!stale) return;
+  const r = spawnSync(
+    process.execPath,
+    [TSC, GAME_ENTRY, '--ignoreConfig', '--target', 'es2022', '--module', 'esnext', '--rootDir', ROOT, '--outDir', WEB_JS_DIR, '--rewriteRelativeImportExtensions'],
+    { cwd: ROOT, encoding: 'utf8' },
+  );
+  if (r.status !== 0 || !existsSync(GAME_OUT)) {
+    throw new Error(`tsc ${GAME_ENTRY} failed (exit ${r.status}): ${r.stdout}${r.stderr}`);
+  }
+}
+
 /** The graph that emits out/web/apps/web/<name>.js for a non-entry module (e.g. mapread). */
 function graphForModule(name: string): Graph | null {
   return GRAPHS.find((g) => g.modules.includes(`apps/web/${name}.ts`)) ?? null;
@@ -306,26 +335,23 @@ const server = createServer((req, res) => {
   }
 
   // The app pages live in apps/web even though the static root is the repo root.
-const GAME_MODULE_ROUTE = /^\/apps\/web\/game\/([A-Za-z0-9_-]+)\.js$/;
+const GAME_MODULE_ROUTE = /^\/apps\/web\/(game|ui)\/([A-Za-z0-9_-]+)\.js$/;
 
-  // The game module graph (B1): apps/web/game/*.ts plus imports.
+  // The game module graph (B1): apps/web/game/*.ts and apps/web/ui/*.ts (B2A) plus imports.
   const gameMod = path.match(GAME_MODULE_ROUTE);
   if (gameMod !== null) {
     try {
-      const tsPath = join(WEB_TS_DIR, 'game', `${gameMod[1]}.ts`);
+      const tsPath = join(WEB_TS_DIR, gameMod[1]!, `${gameMod[2]}.ts`);
       if (!existsSync(tsPath)) {
         send(res, 404, 'text/plain; charset=utf-8', `not found: ${path}`);
         return;
       }
-      const r = spawnSync(
-        process.execPath,
-        [TSC, tsPath, '--ignoreConfig', '--target', 'es2022', '--module', 'esnext', '--rootDir', ROOT, '--outDir', WEB_JS_DIR, '--rewriteRelativeImportExtensions'],
-        { cwd: ROOT, encoding: 'utf8' },
-      );
-      if (r.status !== 0 || !existsSync(join(WEB_JS_DIR, 'apps', 'web', 'game', `${gameMod[1]}.js`))) {
-        throw new Error(`tsc failed (exit ${r.status}): ${r.stdout}${r.stderr}`);
+      buildGameGraph();
+      const abs = join(WEB_JS_DIR, 'apps', 'web', gameMod[1]!, `${gameMod[2]}.js`);
+      if (!existsSync(abs)) {
+        send(res, 404, 'text/plain; charset=utf-8', `not found: ${path}`);
+        return;
       }
-      const abs = join(WEB_JS_DIR, 'apps', 'web', 'game', `${gameMod[1]}.js`);
       send(res, 200, MIME['.js']!, readFileSync(abs));
     } catch (err) {
       send(res, 500, 'text/plain; charset=utf-8', `${path} build failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -365,6 +391,11 @@ function check(): void {
   } catch (err) {
     fails.push(`viewer graphs: ${err instanceof Error ? err.message : String(err)}`);
   }
+  try {
+    buildGameGraph();
+  } catch (err) {
+    fails.push(`game graph: ${err instanceof Error ? err.message : String(err)}`);
+  }
   const files: [string, string][] = [
     ['play.html', join(WEB_TS_DIR, 'play.html')],
     ['game.html', join(WEB_TS_DIR, 'game.html')],
@@ -390,6 +421,7 @@ function check(): void {
     ['out/web/apps/web/play.js', PLAY_OUT],
     ['out/web/apps/web/mapdemo.js', MAPDEMO_OUT],
     ['out/web/apps/web/mapread.js', join(WEB_JS_DIR, 'apps', 'web', 'mapread.js')],
+    ['out/web/apps/web/game/game.js', GAME_OUT],
   ];
   for (const [label, abs] of files) {
     if (!existsSync(abs)) fails.push(`missing ${label} (${abs})`);
@@ -415,6 +447,18 @@ if (argv.includes('--check')) {
   check();
 } else {
   const port = parsePort(argv);
+  // Build before listening: the first page load must not stall the server thread on tsc (see buildGameGraph).
+  for (const build of [buildGraphs, buildGameGraph]) {
+    try {
+      build();
+    } catch (err) {
+      console.error(`serve: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  server.on('error', (err) => {
+    console.error(`serve: cannot listen on 127.0.0.1:${port} (${err.message})`);
+    process.exit(1);
+  });
   server.listen(port, '127.0.0.1', () => {
     console.log(`serve: http://127.0.0.1:${port}/ root=${ROOT} packs=${listPacks().join(',') || '(none)'} maps=${mapList.length}`);
   });

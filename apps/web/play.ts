@@ -119,6 +119,7 @@ const MAX_CATCHUP = 5;       // catch-up cap per frame (spec 5)
 const UNIT_OFF_X = -0.5;     // KM_ResUnits.pas:188
 const UNIT_OFF_Y = -0.4;     // KM_ResUnits.pas:189
 const SELECT_RADIUS_PX = 24; // M2b spec 5
+const CULL_TILES = 6;        // B2B perf: objects this many tiles outside the view are not drawn (sprites stay whole)
 const UNIT_STILL_FRAMES = [0, 3, 2, 2, 1, 6, 7, 6, 6]; // KM_ResUnits.pas:181, index = dir 0..8
 const OWNER_TINTS: [number, number, number][] = [
   [1, 1, 1],           // owner 0 = default: the raw sprite, mask not applied (M2b spec 5)
@@ -567,6 +568,7 @@ let acc = 0;          // tick accumulator, ms
 let lastFrame = 0;
 /** True once a game shell attached its own skirmish world: the shell then owns the sim stepping (frame() only renders). */
 let externalSim = false;
+let cullOn = true;           // B2B perf: skip off-screen sprites (culling(false) draws everything, for A/B checks)
 let flashTimer = 0;
 
 // ---- data helpers -----------------------------------------------------------
@@ -2382,7 +2384,17 @@ function render(): void {
   gl!.bindTexture(gl!.TEXTURE_2D, sheetTex[0]!);
   gl!.uniform1i(uT.tex, 0);
   gl!.bindVertexArray(terrainVao);
-  gl!.drawElements(gl!.TRIANGLES, terrainIndexCount, gl!.UNSIGNED_INT, 0);
+  // Culling (B2B perf): tiles are indexed row by row, so the visible rows are one index range; tall
+  // terrain lifts a quad several rows, hence the margin.
+  let terrainFrom = 0;
+  let terrainN = terrainIndexCount;
+  if (cullOn) {
+    const r0 = Math.max(1, Math.floor((camY - viewH / (2 * zoom)) / CELL) - CULL_TILES * 2);
+    const r1 = Math.min(map.mapY, Math.ceil((camY + viewH / (2 * zoom)) / CELL) + CULL_TILES * 2);
+    terrainFrom = (r0 - 1) * map.mapX * 6;
+    terrainN = Math.max(0, (r1 - r0 + 1) * map.mapX * 6);
+  }
+  gl!.drawElements(gl!.TRIANGLES, terrainN, gl!.UNSIGNED_INT, terrainFrom * 4);
   if (overlayVao !== null && overlayIndexCount > 0) {
     gl!.bindVertexArray(overlayVao);
     gl!.drawElements(gl!.TRIANGLES, overlayIndexCount, gl!.UNSIGNED_INT, 0);
@@ -2456,11 +2468,19 @@ function render(): void {
     const stride = map.mapX + 1;
     const tick = world === null ? 0 : world.tickCount;
     const list: { y: number; run: () => void }[] = [];
+    // Culling (B2B perf): the view in world px plus CULL_TILES of margin; tiles and sprite rects outside it are skipped.
+    const cullPad = CULL_TILES * CELL;
+    const vL = camX - viewW / (2 * zoom) - cullPad;
+    const vR = camX + viewW / (2 * zoom) + cullPad;
+    const vT = camY - viewH / (2 * zoom) - cullPad;
+    const vB = camY + viewH / (2 * zoom) + cullPad;
+    const inView = (x: number, y: number, w: number, h: number): boolean => !cullOn || (x < vR && x + w > vL && y < vB && y + h > vT);
 
     if (treesAtlas !== null) {
       for (const idx of objTiles) {
         const x = idx % stride;
         const y = (idx - x) / stride;
+        if (cullOn && (x * CELL < vL || (x - 1) * CELL > vR || y * CELL < vT || (y - 1) * CELL > vB)) continue;
         const obj = objAt(idx);
         const sp = objectSprite(obj, tick);
         if (sp === undefined) {
@@ -2468,7 +2488,7 @@ function render(): void {
         } else {
           const a = objectAnchor(x, y, obj, sp);
           const spr = sp;
-          list.push({ y: a.cornerY + spr.h, run: () => { drawSpriteIn(treesAtlas!, treeTex, [], spr, a.cornerX, a.cornerY, WHITE, false); drawn.objects++; } });
+          if (inView(a.cornerX, a.cornerY, spr.w, spr.h)) list.push({ y: a.cornerY + spr.h, run: () => { drawSpriteIn(treesAtlas!, treeTex, [], spr, a.cornerX, a.cornerY, WHITE, false); drawn.objects++; } });
         }
         // Falling trees are drawn from a separate entity (spec 2.9: non-looping elapsed steps).
         const f = falling.get(idx);
@@ -2506,6 +2526,7 @@ function render(): void {
         drawn.missing++;
         continue;
       }
+      if (!inView(hs.cornerX, hs.cornerY, hs.sp.w, hs.sp.h)) continue;
       list.push({ y: hs.cornerY + hs.sp.h, run: () => drawHouseEntity(h, drawn) });
     }
 
@@ -2521,7 +2542,7 @@ function render(): void {
         continue;
       }
       const a = unitAnchor(u);
-      list.push({ y: a.y + sp.py + sp.h, run: () => drawUnitEntity(u, sp, a, drawn) });
+      if (inView(a.x + sp.px, a.y + sp.py, sp.w, sp.h)) list.push({ y: a.y + sp.py + sp.h, run: () => drawUnitEntity(u, sp, a, drawn) });
     }
 
     // Projectiles in flight (M4): sorted into the same painter list by their ground line.
@@ -3347,7 +3368,8 @@ async function loadTutorial(): Promise<void> {
 
   finishLoad();
   ensureScan();
-  jumpToVillage(1); // boot into the economy village (hand 1); R fits the whole map again
+  // Boot into the human's village: the fog hand is the human, so a camera on hand 1 sat in black fog (B2B finding 13).
+  if (!jumpToVillage(humanHand())) jumpToVillage(1); // R fits the whole map again
 }
 
 /** Any scanned map: terrain + the mission's houses/units/streets as-is (no economy world). */
@@ -3370,16 +3392,8 @@ async function loadScannedMap(kind: string, name: string): Promise<void> {
   mission = parseMissionScript(datBuf, lm.mapX, lm.mapY);
   fowHand = humanHand();
 
-  // Stored overlays (Remake maps): toRoad joins the mission streets in the road set, toDig1..4
-  // become the plain dig sprites (spec section 5; standard maps carry all-zero overlays).
+  applyStoredOverlays(lm.overlay, lm.mapX, lm.mapY);
   const stride = lm.mapX + 1;
-  for (let ty = 1; ty <= lm.mapY; ty++) {
-    for (let tx = 1; tx <= lm.mapX; tx++) {
-      const ov = lm.overlay[(ty - 1) * lm.mapX + (tx - 1)]!;
-      if (ov === 5) roadTiles.add(ty * stride + tx);
-      else if (ov >= 1 && ov <= 4) digTiles.set(ty * stride + tx, ov);
-    }
-  }
   for (const st of mission.streets) roadTiles.add(st.y * stride + st.x);
   buildMapObjectTiles(true);
   staticHouses = buildStaticHouses(mission);
@@ -3589,6 +3603,19 @@ function scriptedFight(plan?: FightPlan[]): FightReport {
   return { ok: true, mode: 'rebuild', spawned: spots.length, groups: [...byGroup.values()] };
 }
 
+/** Stored overlays (Remake maps): toRoad joins the road set, toDig1..4 become the plain dig sprites
+ *  (spec section 5; standard maps carry all-zero overlays). Shared by the scanned loader and the shell. */
+function applyStoredOverlays(overlay: Uint8Array, mapX: number, mapY: number): void {
+  const stride = mapX + 1;
+  for (let ty = 1; ty <= mapY; ty++) {
+    for (let tx = 1; tx <= mapX; tx++) {
+      const ov = overlay[(ty - 1) * mapX + (tx - 1)]!;
+      if (ov === 5) roadTiles.add(ty * stride + tx);
+      else if (ov >= 1 && ov <= 4) digTiles.set(ty * stride + tx, ov);
+    }
+  }
+}
+
 // ---- test hook (the CDP proof script drives the page through it) ------------
 function installHook(): void {
   const hook = {
@@ -3615,6 +3642,11 @@ function installHook(): void {
     selectedHouseUid: () => selectedHouseUid,
     frameStats: () => ({ ...frameStats }),
     zoom: () => zoom,
+    /** B2B perf A/B switch: culling(false) draws every object (the reference picture); returns the state. */
+    culling: (on?: boolean) => {
+      if (typeof on === 'boolean') cullOn = on;
+      return cullOn;
+    },
     cam: () => ({ x: camX, y: camY }),
     /** Test hook: aim the camera at a world px point (optional zoom). */
     setCam: (x: number, y: number, z?: number) => {
@@ -3966,16 +3998,48 @@ function installHook(): void {
       lastRoadTileCount = -1;
       return true;
     },
+    /** B2A (game UI): the renderer's own click pick (units, then houses) in viewport css px; sets its selection rings. */
+    selectAt: (vx: number, vy: number) => {
+      const r = cv.getBoundingClientRect();
+      selectAt(vx - r.left, vy - r.top);
+      return { unit: selectedUid, house: selectedHouseUid, group: selectedGroupUid };
+    },
+    /** B2A (game UI): the enemy unit, else enemy house, under a viewport point (group order targets). */
+    enemyAt: (vx: number, vy: number) => {
+      const r = cv.getBoundingClientRect();
+      const u = enemyUnitAt(vx - r.left, vy - r.top);
+      const h = u === null ? enemyHouseAt(vx - r.left, vy - r.top) : null;
+      return { unit: u === null ? 0 : u.uid, house: h === null ? 0 : h.uid };
+    },
+    /** B2A (game UI): a house sprite rectangle in viewport css px, or null. */
+    houseRect: (uid: number) => {
+      const h = activeHouses().find((x) => x.uid === uid);
+      if (h === undefined) return null;
+      const hs = houseSpriteOf(h);
+      if (hs === null) return null;
+      const r = cv.getBoundingClientRect();
+      const tl = worldToScreen(hs.cornerX, hs.cornerY);
+      return { x: r.left + tl.x, y: r.top + tl.y, w: hs.sp.w * zoom, h: hs.sp.h * zoom };
+    },
     /** Attach an external economy world and KaMap (the B1 game shell hook). */
     attachWorld: (w: EconomyWorld, km: KaMap, hand?: number) => {
+      // B2B finding 1b: the boot map (the tutorial) was kept when the sizes matched, so every 128x128 map drew
+      // the tutorial's ground. The shell's map is installed whole, as loadScannedMap installs a scanned one.
+      resetMapState();
       world = w;
       currentKaMap = km;
-      if (map === null || km.mapX !== map.mapX || km.mapY !== map.mapY) {
-        map = { file: km.file, mapX: km.mapX, mapY: km.mapY };
-        tiles = km.tiles;
-        baseTerrain = km.baseTerrain ?? null;
-      }
-      if (typeof hand === 'number') fowHand = hand;
+      map = { file: km.file, mapX: km.mapX, mapY: km.mapY };
+      tiles = km.tiles;
+      baseTerrain = km.baseTerrain ?? null;
+      applyStoredOverlays(km.overlay ?? new Uint8Array(km.mapX * km.mapY), km.mapX, km.mapY);
+      // B2B finding 7: the shell's map never went through the scan loader, so take its format and list entry from the map itself.
+      const baseName = km.file.replace(/\.map$/i, '');
+      const entry = mapList.find((m) => m.name === baseName && m.mapX === km.mapX && m.mapY === km.mapY) ?? null;
+      mapRemake = km.remake;
+      mapRev = km.rev ?? 0;
+      mapInfo = entry;
+      mapSource = entry !== null ? { kind: entry.kind, name: entry.name } : { kind: 'map', name: baseName };
+      fowHand = typeof hand === 'number' ? hand : humanHand();
       externalSim = true; // the game shell steps the skirmish (commands, AI, victory); this renderer must not step it too
       buildMode = 'none';
       finishLoad();

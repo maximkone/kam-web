@@ -6,9 +6,9 @@
 //   const b = await openBrowser({ webPort: 8150, cdpPort: 9350 });   // distinct ports per check run
 //   await b.goto('/game.html'); await b.eval('document.title'); await b.shot('name');  b.expect(cond, 'what'); await b.close();
 //   process.exit(b.report('UI X CHECK'));
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, openSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -50,28 +50,65 @@ export interface Browser {
   report(name: string): number;
 }
 
+/** Kill a process and all its children: Edge's renderer and GPU processes outlive the main process by seconds. */
+function killTree(ch: ChildProcess): void {
+  if (ch.pid !== undefined && ch.exitCode === null) spawnSync('taskkill', ['/PID', String(ch.pid), '/T', '/F'], { stdio: 'ignore' });
+}
+
+/** Stop every msedge started with this run's profile dir: Edge hands its work to child processes that a tree kill of the
+ *  launcher can miss (measured: a run-4 browser survived its own check with the port closed). Only processes we started match. */
+function killEdgeProfile(profile: string): void {
+  if (profile === '') return;
+  spawnSync('powershell', ['-NoProfile', '-Command', `Get-CimInstance Win32_Process -Filter "Name='msedge.exe'" | Where-Object { $_.CommandLine -like '*${profile}*' } | ForEach-Object { taskkill /PID $_.ProcessId /T /F | Out-Null }`], { stdio: 'ignore' });
+}
+
+/** True while something answers this URL. */
+async function answers(url: string): Promise<boolean> {
+  try { await fetch(url, { signal: AbortSignal.timeout(1500) }); return true; } catch { return false; }
+}
+
+/** Wait until nothing answers at url: a port held by another run (or an Edge still shutting down) would make this run read that
+ *  process's server or browser instead of its own. Fails with a clear message instead of a timeout deep in the run. */
+async function waitFree(url: string, what: string, ms: number): Promise<void> {
+  const until = Date.now() + ms;
+  while (await answers(url)) {
+    if (Date.now() > until) throw new Error(`${what} is still answered by another process after ${ms / 1000} s; pass another port`);
+    await sleep(250);
+  }
+}
+
 export async function openBrowser(opts: { webPort: number; cdpPort: number; width?: number; height?: number; deadlineMs?: number }): Promise<Browser> {
   mkdirSync(SHOTS, { recursive: true });
   const width = opts.width ?? 1280, height = opts.height ?? 800;
   const children: ChildProcess[] = [];
+  let profile = '';
   const failures: string[] = [];
   const notes: string[] = [];
   const consoleErrors: string[] = [];
-  const stop = (): void => { for (const ch of children) { try { ch.kill(); } catch { /* already gone */ } } };
+  const stop = (): void => { for (const ch of children) { if (ch.spawnfile === EDGE) { killTree(ch); killEdgeProfile(profile); } else { try { ch.kill(); } catch { /* already gone */ } } } };
   const deadline = setTimeout(() => { stop(); console.log('UI CHECK FAIL (overall deadline)'); for (const f of failures) console.log('  - ' + f); if (consoleErrors.length > 0) console.log('  - console errors: ' + consoleErrors.slice(0, 6).join(' | ')); process.exit(2); }, opts.deadlineMs ?? 280000);
   deadline.unref();
+  process.once('exit', stop);
 
+  await waitFree(`http://127.0.0.1:${opts.webPort}/maps`, `web port ${opts.webPort}`, 20000);
   const server = spawn(process.execPath, ['apps/web/serve.ts', '--port', String(opts.webPort)], { cwd: ROOT, stdio: 'ignore' });
   children.push(server);
   await waitFor(async () => (await fetch(`http://127.0.0.1:${opts.webPort}/maps`)).ok, 'dev server', 90000);
-  const profile = mkdtempSync(join(SHOTS, 'edge-profile-'));
+  // An earlier browser still holding the port would make this one fail silently (its CDP never binds): wait for it to go.
+  await waitFree(`http://127.0.0.1:${opts.cdpPort}/json/version`, `CDP port ${opts.cdpPort}`, 20000);
+  profile = mkdtempSync(join(SHOTS, 'edge-profile-'));
+  // Edge's own log (why DevTools did not bind, if it did not) is kept next to the shots for the failure message.
+  const edgeLog = `${profile}.stderr.log`;
   const edge = spawn(EDGE, ['--headless=new', `--remote-debugging-port=${opts.cdpPort}`, `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check',
-    '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist', `--window-size=${width},${height}`, 'about:blank'], { stdio: 'ignore' });
+    '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist', `--window-size=${width},${height}`, '--enable-logging=stderr', '--v=0', 'about:blank'],
+  { stdio: ['ignore', openSync(edgeLog, 'w'), 'ignore'] });
   children.push(edge);
+  let edgeExit = '';
+  edge.on('exit', (code, signal) => { edgeExit = `exited (${code ?? signal})`; });
   const wsUrl = await waitFor(async () => {
     const list = (await (await fetch(`http://127.0.0.1:${opts.cdpPort}/json/list`)).json()) as { type: string; webSocketDebuggerUrl: string }[];
     return list.find((t) => t.type === 'page')?.webSocketDebuggerUrl ?? null;
-  }, 'edge page target', 30000);
+  }, 'edge page target', 30000).catch((e: Error) => { throw new Error(`${e.message} (CDP port ${opts.cdpPort}; Edge ${edgeExit || 'still running'}; Edge log ${edgeLog})`); });
 
   const ws = new WebSocket(wsUrl);
   await new Promise<void>((res, rej) => { ws.onopen = () => res(); ws.onerror = () => rej(new Error('ws error')); });
@@ -110,7 +147,13 @@ export async function openBrowser(opts: { webPort: number; cdpPort: number; widt
     wheel: async (x, y, deltaY) => { await send('Input.dispatchMouseEvent', { type: 'mouseWheel', x, y, deltaX: 0, deltaY }); },
     consoleErrors, failures, notes,
     expect: (ok, what) => { if (!ok) failures.push(what); },
-    close: async () => { clearTimeout(deadline); try { ws.close(); } catch { /* closed */ } stop(); },
+    close: async () => {
+      clearTimeout(deadline);
+      try { ws.close(); } catch { /* closed */ }
+      stop();
+      const freeBy = Date.now() + 10000;
+      while (await answers(`http://127.0.0.1:${opts.cdpPort}/json/version`) && Date.now() < freeBy) await sleep(250);
+    },
     report: (name) => {
       if (consoleErrors.length > 0) failures.push(`console errors (${consoleErrors.length}): ${consoleErrors.slice(0, 3).join(' | ')}`);
       if (failures.length === 0) { console.log(`${name} PASS (${notes.join('; ')}; screenshots ${SHOTS})`); return 0; }
@@ -123,10 +166,14 @@ export async function openBrowser(opts: { webPort: number; cdpPort: number; widt
 /** Common flow: open /game.html, wait until the renderer is ready, pick a map by (filtered) name and start; resolves when the tick runs. */
 export async function startMatch(b: Browser, mapName = 'Battle Sun'): Promise<void> {
   await b.goto('/game.html');
-  await waitFor(async () => (await b.eval("document.querySelectorAll('.maprow').length")) > 0, 'map list', 60000);
+  await waitFor(async () => (await b.eval("document.querySelectorAll('.maprow').length")) > 0, 'map list', 60000).catch(async (e: Error) => {
+    const t = Date.now();
+    const probe = await fetch(`${b.webBase}/maps`, { signal: AbortSignal.timeout(60000) }).then((r) => `status ${r.status}`, (err: Error) => `failed (${err.message})`);
+    throw new Error(`${e.message}; node GET /maps: ${probe} in ${Date.now() - t} ms`);
+  });
   await b.eval(`(() => { const f = document.getElementById('filter'); f.value = ${JSON.stringify(mapName)}; f.dispatchEvent(new Event('input', { bubbles: true })); })()`);
   await waitFor(async () => (await b.eval("!document.getElementById('startbtn').disabled")) === true, 'Start enabled (renderer ready)', 90000);
-  await b.eval("document.querySelector('.maprow').click()");
+  await b.eval(`[...document.querySelectorAll('.maprow')].find((r) => r.dataset.name === ${JSON.stringify(mapName)}).click()`);
   await b.eval("document.getElementById('startbtn').click()");
   await waitFor(async () => Number(await b.eval("document.getElementById('tick').textContent")) >= 5 ? true : null, 'the game loop runs (tick >= 5)', 90000);
 }

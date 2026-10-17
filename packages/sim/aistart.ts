@@ -77,15 +77,24 @@ export function richStartSizes(level: Exclude<AiStartLevel, 'none'>, overrides: 
   return sizes;
 }
 
+/** Rings tried for the barracks: the normal 4-12 first (frozen behaviour), then closer and farther ones for small maps. */
+function barracksRings(): number[] {
+  const rings: number[] = [];
+  for (let r = BARRACKS_RING_MIN; r <= BARRACKS_RING_MAX; r++) rings.push(r);
+  rings.push(3, 2);
+  for (let r = BARRACKS_RING_MAX + 1; r <= BARRACKS_RING_MAX + 12; r++) rings.push(r);
+  return rings;
+}
+
 /**
  * The barracks on the first spot 4-12 tiles from the store that the economy accepts (canPlaceHouse on the
- * entrance), built as a finished house with its road to the store. Throws when no spot is free.
+ * entrance), built as a finished house with its road to the store. Returns -1 when no spot is free on the whole map.
  */
 function placeBarracks(world: EconomyWorld, hand: number): number {
   const store = world.findFirstHouse(HT_STORE, hand);
   const spec = world.houseSpecOf(HT_BARRACKS);
   if (store === null || spec === undefined) throw new Error(`aistart: hand ${hand} has no store or no barracks spec`);
-  for (let r = BARRACKS_RING_MIN; r <= BARRACKS_RING_MAX; r++) {
+  for (const r of barracksRings()) {
     for (let dy = -r; dy <= r; dy++) {
       for (let dx = -r; dx <= r; dx++) {
         if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
@@ -101,7 +110,7 @@ function placeBarracks(world: EconomyWorld, hand: number): number {
       }
     }
   }
-  throw new Error(`aistart: no barracks spot near the store of hand ${hand}`);
+  return -1; // no spot on the whole map (for example Arena): the AI starts with its groups but no barracks
 }
 
 /** Full militia groups on a grid around the store entrance, as a map's SET_UNIT records would place them. */
@@ -140,7 +149,8 @@ export function applyRichStart(world: EconomyWorld, hand: number, options: RichS
   ];
   for (const [ware, amount] of kit) world.addWareToStore(hand, ware, amount);
   const barracksUid = placeBarracks(world, hand);
-  for (let i = 0; i < sizes.recruits; i++) world.barracksAddRecruit(barracksUid);
+  const recruits = barracksUid >= 0 ? sizes.recruits : 0;
+  for (let i = 0; i < recruits; i++) world.barracksAddRecruit(barracksUid);
   const groupUids = placeStartGroups(world, hand, sizes.groups, sizes.groupSize);
-  return { level: options.level, sizes, barracksUid, recruitsWaiting: sizes.recruits, groupUids, kit };
+  return { level: options.level, sizes, barracksUid, recruitsWaiting: recruits, groupUids, kit };
 }

@@ -48,3 +48,23 @@ for (const map of MAPS) {
     assert.ok(w.findFirstHouse(HT_STORE, HUMAN) !== null, 'the store is still there after 100 ticks');
   });
 }
+
+for (const map of MAPS) {
+  test(`start: ${map} starts with the AI rich start (aiStart normal) and runs 100 ticks`, { skip }, () => {
+    const base = `${INSTALL}/${map}/${map.slice(map.indexOf('/') + 1)}`;
+    const sk = createSkirmish({
+      mapBytes: new Uint8Array(readFileSync(`${base}.map`)),
+      mapPath: `${base}.map`,
+      missionDat: new Uint8Array(readFileSync(`${base}.dat`)),
+      defines: defines(),
+      seed: 1,
+      slots: [
+        { hand: HUMAN, kind: 'human' },
+        { hand: AI, kind: 'ai', aiStart: 'normal' },
+      ],
+    });
+    assert.ok(sk.world.findFirstHouse(HT_STORE, AI) !== null, 'the AI hand has a store');
+    for (let i = 0; i < 100; i++) step(sk, []);
+    assert.equal(sk.world.tickCount, 100);
+  });
+}
