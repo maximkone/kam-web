@@ -65,6 +65,11 @@ const PLAY_MODULES = [
   'packages/sim/economy.ts',
   'packages/sim/combat.ts',
 ];
+// M5: worker K's construction module joins the play graph once it is on disk (economy.ts imports
+// it; the viewer itself only probes the world's API). A missing file must not mark the graph
+// stale, so it is only listed when present.
+const CONSTRUCTION_MODULE = 'packages/sim/construction.ts';
+if (existsSync(join(ROOT, CONSTRUCTION_MODULE))) PLAY_MODULES.push(CONSTRUCTION_MODULE);
 
 // The terrain viewer's graph: mapdemo.ts + the shared browser map reader.
 const MAPDEMO_ENTRY = 'apps/web/mapdemo.ts';

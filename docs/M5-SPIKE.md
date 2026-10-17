@@ -162,4 +162,48 @@ sha256), then a browser match where the human can fight it on a real map.
 
 ## 7. Acceptance record
 
-(filled by the lead at acceptance)
+### 7.1 Worker K — construction sim: accepted (wave 1)
+
+- `node tools/buildsim/cli.ts --check` → `BUILD CHECK PASS` (2000 ticks, 281 events) (exit 0); two
+  runs identical sha256 `98b805259afc4f7020f07f378dd9d6368f30a111d3f5952936855d74ca7315e3`;
+  perturbed `expected.ts` → FAIL.
+- Frozen numbers (tutorial, hand 1): hut plan → dug → **materials delivered** (woodDelivered 3,
+  stoneDelivered 2, supply 5) → built (`hut=done progress=250`) → `activated=1`; road dug+built,
+  corn field built, `doorRoad=true`; events incl. `build-area-assigned=1 build-house-assigned=9
+  house-wip=1 house-plan-digged=1 house-activated=1 road-built=2 field-built=1`.
+- `npm test` **109/109** (construction.test.ts wired in by the lead); `npx tsc --noEmit` exit 0.
+- Regressions: WALK CHECK PASS, ECON CHECK PASS (sha `6d780b62…` unchanged), COMBAT CHECK PASS (sha
+  `09a19821…` unchanged), MAPSCAN CHECK PASS.
+- Accepted v0 divergences (K's flags): `1.42` in the spec is a distance tolerance, not a speed
+  (implemented as the distance intent); `FlattenTerrain` simplified (half-mix toward the corner
+  average, no `tpElevate`/recursion/lighting); `GetOutOfTheWay` ported with the weighted-random
+  neighbour, `JamMeter`/tower checks skipped; `CanAddHousePlan` FOW branch skipped and
+  `CanAddHousePlanAI` deferred to wave 2; wine fields out; `dkToUnit` minimal (builders only);
+  repairs/demolition-from-plan/fake fields/save-load out; three additive parser fields
+  (`tiledata.soil`, `mapelem.killByRoad`, `terrain.checkHeightPass(limit)`).
+
+### 7.2 Worker L — construction viewer: accepted (wave 1)
+
+- `npx tsc --noEmit` exit 0; `SERVE CHECK PASS`; L's own CDP run **44/44** — the full sequence with
+  real clicks on the tutorial (store plan at entrance (19,14) → Loc (20,14)): dug (tick 118) → wood
+  (644) → serfs deliver (piles grow, max wood 4 / stone 5) → stone (1250, 300/550) → **done and
+  activated (1546, 550/550)**; roads 249→256; corn field built; screenshots (plan markers, road
+  plans, site dug, wood stage, supply piles, stone stage, complete house, corn built).
+- Lead's independent browser run (`%TEMP%\opencode\kamweb_m5a_leadcdp.mjs`, live server on 8144):
+  boot counters hold (21/34/159/30), FOW 255 at the village, a **real click places a store plan**
+  (plan `taken` by a builder), the site **digs and reaches the wood stage** (house state log
+  `digging → wood`), and with the plan off the road network no materials arrive — the documented
+  road-connection rule (`ValidDelivery`). The delivery-dependent completion is proven by the
+  headless check (§7.1, lead-run) and L's run above. Regressions on the same page: economy ticking,
+  M3b picker loads Arena, 0 blocked requests, no exceptions.
+- Accepted viewer deviations (L's flags): placement calls the construction module directly
+  (`canAddHousePlan`/`addHousePlan`; a world wrapper would be nicer); the dug site shows fences +
+  live flattened terrain (the game sets no dig overlay for house areas); deliveries need a road
+  connection; wine placement out; plan markers cover the human hand.
+
+### 7.3 Wave 2 (the AI) — next
+
+`docs/M5-AI-NOTES.md` + §3 of this document; worker M (economy AI: Eye/Influences/CityPredictor/
+CityPlanner/CityBuilder/CityManagement), then worker N (military AI: ArmyManagement/ArmyAttackNew/
+ArmyDefence/Supervisor). Acceptance: `tools/aisim` deterministic AI-vs-idle skirmish + a browser
+match on a real map.

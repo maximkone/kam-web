@@ -48,6 +48,20 @@
 // through the frozen world.orderGroup. The M4 world API (groups/projectiles/fow/orderGroup/
 // damageHouse/unitHealth/groupOf, combat.ts + economy.ts) is used directly, typed by the sim.
 //
+// M5 (docs/M5-SPIKE.md section 5): the construction viewer. WIP houses draw the real build stages —
+// hbsNoGlyph invisible (the dug site shows its wooden fence, the game's fncHouseFence over the
+// flattened BuildArea), hbsWood/hbsStone draw the WoodPic/StonePic sprites blended by the stage
+// progress through the sprite masks (KM_Houses.pas:2395-2435 + KM_RenderPool.pas:760-824; the
+// sprite mask alpha IS the build-progress coverage mask, verified on Houses.m0.png), supply piles
+// draw 260+n-1 / 267+n-1 with the BuildSupply offsets (KM_RenderPool.pas:716-743), house plans
+// draw rope outlines + entrance tablets (GetOutlines/GetTablets, KM_HandConstructions.pas:873-922),
+// field plans draw the road/corn markups (KM_RenderTerrain.pas:1412-1439) and built roads refresh
+// the overlay pass from the live sim (world.isRoadTile/roadTileCount). The human places plans with
+// B (house plans, [ ] cycle types), V (roads), C (corn fields); right-click/Escape cancels. The
+// construction world API is duck-typed (`world.addHousePlan(...)` etc., docs/M5-SPIKE.md section 3)
+// so this page builds and runs before packages/sim/construction.ts lands; hooks plans()/
+// houseBuildState(uid)/supplyCounts(uid) expose the state the lead's CDP proof reads.
+//
 // serve.ts transpiles this file together with the browser-safe modules it imports (one tsc run,
 // --rewriteRelativeImportExtensions): /apps/web/play.js + /packages/**/*.js.
 // ESM, zero runtime deps, imports keep the .ts extension (node/tsc) and become .js for the browser.
@@ -59,6 +73,7 @@ import { parseHousesDat, housePlan } from '../../packages/assets/housedata.ts';
 import { WARE_CNT, WARE_NAMES, WT_TRUNK, WT_TIMBER } from '../../packages/assets/wares.ts';
 import { parseMissionScript } from '../../packages/mission/mission.ts';
 import { createEconomyWorld, applyDemoScenario } from '../../packages/sim/economy.ts';
+import * as C from '../../packages/sim/construction.ts';
 import { buildPassGrid, tileWalkable } from '../../packages/sim/terrain.ts';
 import { findPath } from '../../packages/sim/astar.ts';
 import { startWalk, walkTick, walkSpeeds } from '../../packages/sim/walk.ts';
@@ -172,12 +187,75 @@ const FIRE_COUNT = 8;
 const FOW_HIDE_AT = 128;      // projectile render skip: CheckRevelation <= 128 (KM_RenderPool.pas:1011)
 const HUMAN_HAND_FALLBACK = 0; // mission.humanPlayer fallback (M3 spec 2.1: hand 0 is the human)
 
+// ---- M5 construction constants (docs/M5-SPIKE.md sections 2.2, 2.3, 5) ---------
+// TKMHouseBuildState = (hbsNoGlyph, hbsWood, hbsStone, hbsDone) (common/KM_Defaults.pas:762):
+// the sim's numeric build states; strings with the same names are accepted too.
+const HBS_DIGGING = 0;
+const HBS_WOOD = 1;
+const HBS_STONE = 2;
+const HBS_DONE = 3;
+// GUI atlas game ids (atlas i = gfx id - 1, KM_ResSprites.pas:780/2035): plan ropes 105/117 and
+// site fences 463/467 (KM_RenderTerrain.pas:1351-1357), field markups 105/107/108 (:1414).
+const GUI_ROPE_H = 105;
+const GUI_ROPE_V = 117;
+const GUI_SITE_FENCE_H = 463;
+const GUI_SITE_FENCE_V = 467;
+const GUI_MARKUP_ROAD = 105;
+const GUI_MARKUP_CORN = 107;
+const GUI_MARKUP_WINE = 108;
+// TabletSpriteId per script id (HOUSE_DAT_X type 2..30 order, KM_ResHouses.pas:239-547).
+const TABLET_ICON_BY_TYPE: number[] = [
+  261, 271, 258, 272, 275, 254, 259, 257, 256, 278, 255, 252, 277, 266, 273,
+  265, 251, 264, 274, 263, 262, 267, 276, 269, 268, 253, 270, 279, 260,
+];
+const SUPPLY_WOOD_PIC = 260;  // wood pile sprite 260+n-1 (KM_RenderPool.pas:728)
+const SUPPLY_STONE_PIC = 267; // stone pile sprite 267+n-1 (:737)
+const BUILD_SUPPLY_OFF = 1530; // houses.dat BuildSupply 2x6 (MoveX,MoveY) i32 pairs (KM_ResHouses.pas:19/34)
+const BUILD_SUPPLY_MAX = 6;    // sprite table 260..265 / 267..272 (n = 1..6)
+const FT_ROAD = 1;             // TKMFieldType ftRoad (KM_Defaults.pas:783-789)
+const FT_CORN = 2;
+const FT_WINE = 3;
+const DIR_N = 1;               // TKMDirection (KM_Points.pas:8): dirNA, dirN, dirNE, dirE, ... dirW
+const DIR_E = 3;
+const DIR_S = 5;
+const DIR_W = 7;
+const FENCE_OVERLAP = 4;       // RenderFence FO/VO (KM_RenderTerrain.pas:1343-1344)
+
 // ---- M4 combat types (docs/M4-SPIKE.md section 3) ---------------------------
 // The sim's own types (packages/sim/combat.ts landed); the viewer reads the frozen world API
 // directly. `FowPointRev` only probes the optional point-revelation helper beyond section 3.
 interface FowPointRev {
   checkRev?(x: number, y: number): number;
 }
+
+// ---- M5 construction types (docs/M5-SPIKE.md section 3) ---------------------
+// Duck-typed on purpose: packages/sim/construction.ts + the economy.ts wiring land in parallel
+// (worker K); this page compiles and runs with or without them and picks the API up at runtime.
+interface HousePlanView { uid: number; typeId: number; x: number; y: number; status: string; workerUid: number }
+interface FieldPlanView { x: number; y: number; fieldType: number; fieldTypeName: string; status: string; workerUid: number }
+interface ConstructionStateView { plans: HousePlanView[]; fields: FieldPlanView[]; sites: unknown[]; unlocked: boolean[] | null }
+interface ConstructionProbe {
+  addHousePlan?: (hand: number, typeId: number, x: number, y: number) => unknown;
+  canAddHousePlan?: (hand: number, typeId: number, x: number, y: number) => unknown;
+  remHousePlan?: (hand: number, x: number, y: number) => unknown;
+  addFieldPlan?: (hand: number, x: number, y: number, fieldType?: number | string) => unknown;
+  remFieldPlan?: (hand: number, x: number, y: number) => unknown;
+  constructionState?: (hand: number) => unknown; // ConstructionQueries.constructionState (construction.ts:95)
+  constructionOf?: (hand: number) => unknown;
+  constructions?: unknown; // per-hand array
+  construction?: unknown;  // per-hand array or a single state
+}
+type BuildPhase = 'digging' | 'wood' | 'stone' | 'done' | 'unknown';
+interface BuildInfo {
+  phase: BuildPhase;
+  raw: string | number | null;
+  progress: number | null; // fBuildingProgress (effort points, 50 per ware unit)
+  woodDelivered: number | null;
+  stoneDelivered: number | null;
+  woodSupply: number | null; // fBuildSupplyWood: the remaining pile count (AddHouseBuildSupply)
+  stoneSupply: number | null;
+}
+type BuildMode = 'none' | 'house' | 'road' | 'corn';
 
 const cv = document.getElementById('cv') as HTMLCanvasElement;
 const hud = document.getElementById('hud') as HTMLDivElement;
@@ -233,10 +311,19 @@ uniform float uZoom;
 uniform vec2 uView;
 uniform vec2 uWorld; // quad top-left, world px
 uniform vec2 uSize;  // quad size, world px
+uniform float uQuadMode; // M5: 1 = per-corner world positions (skewed fence/markup quads)
+uniform vec2 uWP[4];     // TL, TR, BL, BR world px
 out vec2 vPos;
 out vec2 vWorld;
 void main() {
-  vec2 w = uWorld + aPos * uSize;
+  vec2 w;
+  if (uQuadMode > 0.5) {
+    vec2 p0 = mix(uWP[0], uWP[1], aPos.x);
+    vec2 p1 = mix(uWP[2], uWP[3], aPos.x);
+    w = mix(p0, p1, aPos.y);
+  } else {
+    w = uWorld + aPos * uSize;
+  }
   vec2 css = (w - uCam) * uZoom + uView * 0.5;
   gl_Position = vec4(css.x / uView.x * 2.0 - 1.0, 1.0 - css.y / uView.y * 2.0, 0.0, 1.0);
   vPos = aPos;
@@ -254,14 +341,38 @@ uniform vec4 uMaskRect; // mask rect in its mask sheet, px
 uniform vec2 uMaskSheet;
 uniform float uHasMask;
 uniform vec3 uTint;
+uniform float uCustomUV; // M5: per-corner UVs (fence/markup quads that rotate or crop a sprite)
+uniform vec2 uUV[4];     // TL, TR, BL, BR in sheet space
+uniform float uCutMode;  // M5: build-stage alpha test (RenderSpriteAlphaTest, KM_RenderPool.pas:1246)
+uniform float uCut1;     // keep where mask alpha > uCut1 (wood progress cut)
+uniform sampler2D uMask2Tex; // second mask (the stone sprite's, when both stages draw)
+uniform vec4 uMask2Rect;
+uniform vec2 uMask2Sheet;
+uniform float uHasCut2;  // also discard where mask2 alpha > uCut2
+uniform float uCut2;
 uniform sampler2D uFow; // vertex revelation grid, mapX x mapY
 uniform float uFowOn;
 uniform vec2 uMapCells;
 uniform float uCell;
 out vec4 outColor;
 void main() {
-  vec2 uv = (uRect.xy + vPos * uRect.zw) / uSheet;
+  vec2 uv;
+  if (uCustomUV > 0.5) {
+    vec2 b0 = mix(uUV[0], uUV[1], vPos.x);
+    vec2 b1 = mix(uUV[2], uUV[3], vPos.x);
+    uv = mix(b0, b1, vPos.y);
+  } else {
+    uv = (uRect.xy + vPos * uRect.zw) / uSheet;
+  }
   vec4 c = texture(uTex, uv);
+  if (uCutMode > 0.5) {
+    vec2 m1 = (uMaskRect.xy + vPos * uMaskRect.zw) / uMaskSheet;
+    if (texture(uMaskTex, m1).a <= uCut1) discard;
+    if (uHasCut2 > 0.5) {
+      vec2 m2 = (uMask2Rect.xy + vPos * uMask2Rect.zw) / uMask2Sheet;
+      if (texture(uMask2Tex, m2).a > uCut2) discard;
+    }
+  }
   if (uHasMask > 0.5) {
     vec2 muv = (uMaskRect.xy + vPos * uMaskRect.zw) / uMaskSheet;
     float m = texture(uMaskTex, muv).a;
@@ -313,6 +424,8 @@ const uS = {
   view: gl.getUniformLocation(spriteProg, 'uView')!,
   world: gl.getUniformLocation(spriteProg, 'uWorld')!,
   size: gl.getUniformLocation(spriteProg, 'uSize')!,
+  quadMode: gl.getUniformLocation(spriteProg, 'uQuadMode')!,
+  wp: gl.getUniformLocation(spriteProg, 'uWP[0]')!,
   rect: gl.getUniformLocation(spriteProg, 'uRect')!,
   sheet: gl.getUniformLocation(spriteProg, 'uSheet')!,
   tex: gl.getUniformLocation(spriteProg, 'uTex')!,
@@ -321,6 +434,15 @@ const uS = {
   maskSheet: gl.getUniformLocation(spriteProg, 'uMaskSheet')!,
   hasMask: gl.getUniformLocation(spriteProg, 'uHasMask')!,
   tint: gl.getUniformLocation(spriteProg, 'uTint')!,
+  customUV: gl.getUniformLocation(spriteProg, 'uCustomUV')!,
+  uv: gl.getUniformLocation(spriteProg, 'uUV[0]')!,
+  cutMode: gl.getUniformLocation(spriteProg, 'uCutMode')!,
+  cut1: gl.getUniformLocation(spriteProg, 'uCut1')!,
+  mask2Tex: gl.getUniformLocation(spriteProg, 'uMask2Tex')!,
+  mask2Rect: gl.getUniformLocation(spriteProg, 'uMask2Rect')!,
+  mask2Sheet: gl.getUniformLocation(spriteProg, 'uMask2Sheet')!,
+  hasCut2: gl.getUniformLocation(spriteProg, 'uHasCut2')!,
+  cut2: gl.getUniformLocation(spriteProg, 'uCut2')!,
   fow: gl.getUniformLocation(spriteProg, 'uFow')!,
   fowOn: gl.getUniformLocation(spriteProg, 'uFowOn')!,
   mapCells: gl.getUniformLocation(spriteProg, 'uMapCells')!,
@@ -365,6 +487,11 @@ let unitByI: Map<number, AtlasSprite> = new Map();
 let houseByI: Map<number, AtlasSprite> = new Map();
 let treeByI: Map<number, AtlasSprite> = new Map();
 let tilesByI: Map<number, AtlasSprite> = new Map(); // Tileset atlas lookup (terrain + road overlay)
+
+// M5: the GUI atlas (plan ropes/fences/markups/tablets; KM_RenderPool.pas:698-712, KM_RenderTerrain.pas).
+let guiAtlas: Atlas | null = null;
+let guiTex: WebGLTexture[] = [];
+let guiByI: Map<number, AtlasSprite> = new Map();
 
 // M3 world + the tables the frozen interfaces do not carry (see the header note).
 let specs: UnitSpec[] = [];
@@ -411,8 +538,16 @@ let fowDirtyTick = -1;
 let currentKaMap: KaMap | null = null;
 let selectedGroupUid = 0;
 let houseFireAnims: AnimLoop[][] = []; // per script id, [haFire1..8] loops (viewer parse, like supply)
+// M5: BuildSupply offsets per script id: [row 0 = wood 1..6, row 1 = stone 1..6] of (MoveX,MoveY)
+// px relative to the house Loc (KM_RenderPool.pas:716-743; houses.dat offset 1530).
+let buildSupply: { x: number; y: number }[][][] = [];
 let projectileDrawCount = 0;
 let projectileScreens: { uid: number; kind: string; x: number; y: number; w: number; h: number }[] = [];
+
+// M5: the human's plan placement mode + live-road overlay refresh (world.isRoadTile scan).
+let buildMode: BuildMode = 'none';
+let buildType = 11; // script id 11 = store (htStore, released at start — KM_HandLocks.pas:62)
+let lastRoadTileCount = -1;
 
 let quadVao: WebGLVertexArrayObject | null = null;
 let ringTex: WebGLTexture | null = null;
@@ -475,10 +610,14 @@ async function loadTexture(url: string): Promise<WebGLTexture> {
   return tex;
 }
 
-/** Height byte of tile (tX,tY), 1-based; out-of-map reads are 0 (M1 section 2.3). */
+/** Height byte of tile (tX,tY), 1-based; out-of-map reads are 0 (M1 section 2.3).
+ *  M5: with a live world the sim's corner heights win — FlattenTerrain rewrites them while a
+ *  builder digs a house area, and the terrain VBO is rebuilt when they change (see render()). */
 function cornerHeight(tX: number, tY: number): number {
-  if (map === null || tiles === null) return 0;
+  if (map === null) return 0;
   if (tX < 1 || tY < 1 || tX > map.mapX || tY > map.mapY) return 0;
+  if (world !== null) return world.grid.height[tY * (map.mapX + 1) + tX]!;
+  if (tiles === null) return 0;
   return tiles[((tY - 1) * map.mapX + (tX - 1)) * 4 + 1];
 }
 
@@ -560,6 +699,33 @@ function parseHouseFireAnims(buf: Uint8Array): AnimLoop[][] {
       loops.push({ steps, count: readI16(buf, o + 60), moveX: readI32(buf, o + 62), moveY: readI32(buf, o + 66) });
     }
     out[slot] = loops;
+  }
+  return out;
+}
+
+/**
+ * houses.dat BuildSupply (record offset 1530, 2 rows x 6 cols of packed (MoveX, MoveY) i32,
+ * TKMHouseBuildSupply KM_ResHouses.pas:19/34): the supply pile offsets in px relative to the
+ * house Loc, row 0 = wood 1..6, row 1 = stone 1..6 (KM_RenderPool.pas:716-743). Viewer-side like
+ * the supply/fire tables — the frozen HouseSpec does not carry it.
+ */
+function parseBuildSupply(buf: Uint8Array): { x: number; y: number }[][][] {
+  const out: { x: number; y: number }[][][] = [];
+  for (let i = 0; i < HOUSE_ID_TO_TYPE.length; i++) {
+    const rows: { x: number; y: number }[][] = [];
+    for (let r = 0; r < 2; r++) rows.push(new Array(BUILD_SUPPLY_MAX).fill(null).map(() => ({ x: 0, y: 0 })));
+    out.push(rows);
+  }
+  for (let slot = 0; slot < 29; slot++) {
+    const b = HOUSES_DAT_HEAD + slot * HOUSES_DAT_RECORD;
+    if (b + HOUSES_DAT_RECORD > buf.length) break;
+    const typeId = HOUSE_ID_TO_TYPE[slot]!;
+    for (let r = 0; r < 2; r++) {
+      for (let n = 0; n < BUILD_SUPPLY_MAX; n++) {
+        const o = b + BUILD_SUPPLY_OFF + (r * BUILD_SUPPLY_MAX + n) * 8;
+        out[typeId]![r]![n] = { x: readI32(buf, o), y: readI32(buf, o + 4) };
+      }
+    }
   }
   return out;
 }
@@ -863,6 +1029,23 @@ function buildTerrainVbo(byI: Map<number, AtlasSprite>): void {
 }
 
 /**
+ * The live road set of the current world (mission streets + roads built at runtime), scanned from
+ * the frozen world API. Rebuilt on demand (the render refreshes the overlay when roadTileCount
+ * changes) — a full scan is ~mapX*mapY isRoadTile calls and only happens on a change.
+ */
+function liveRoadSet(): Set<number> {
+  const out = new Set<number>();
+  if (world === null || map === null) return out;
+  const stride = map.mapX + 1;
+  for (let y = 1; y <= map.mapY; y++) {
+    for (let x = 1; x <= map.mapX; x++) {
+      if (world.isRoadTile(x, y)) out.add(y * stride + x);
+    }
+  }
+  return out;
+}
+
+/**
  * Overlay pass (M3 spec 2.9 + M3b spec section 5): one static VBO with two quad groups —
  *  - roads: every toRoad tile (the mission's !SET_STREET list, plus the Remake map's stored
  *    overlay toRoad) draws its connectivity sprite from the neighbor mask N=1,E=2,S=4,W=8
@@ -875,10 +1058,13 @@ function buildOverlayVbo(): void {
   const mx = map.mapX;
   const my = map.mapY;
   const stride = mx + 1;
-  const isRoad = (x: number, y: number): boolean => roadTiles.has(y * stride + x);
+  // M5: with a live economy world the roads come from the sim (world.isRoadTile includes the
+  // mission streets + roads built at runtime); static mode uses the mission/map road set.
+  const roadSet = world !== null ? liveRoadSet() : roadTiles;
+  const isRoad = (x: number, y: number): boolean => roadSet.has(y * stride + x);
   const quads: { x: number; y: number; id: number; rot: number }[] = [];
 
-  for (const idx of roadTiles) {
+  for (const idx of roadSet) {
     const x = idx % stride;
     const y = (idx - x) / stride;
     let mask = 0;
@@ -1106,6 +1292,37 @@ function jumpToVillage(owner: number): boolean {
 // ---- sprite drawing (M2b drawUnit generalised to the three atlases) ---------
 const WHITE: [number, number, number] = [1, 1, 1];
 
+/** M5 draw options: rotated/cropped quads (fences, markups), build-stage cuts, FOW overrides. */
+interface SpriteDrawOpts {
+  /** World rect override (fence/markup quads are not the sprite's own size). */
+  quad?: { x: number; y: number; w: number; h: number };
+  /** Per-corner world positions TL, TR, BL, BR (skewed quads that follow the terrain height). */
+  corners?: [number, number][];
+  /** Per-corner UVs in sheet space (TL, TR, BL, BR) — RenderFence/RenderMarkup rotate a sprite. */
+  customUV?: [number, number][];
+  /** RenderSpriteAlphaTest (KM_RenderPool.pas:1246-1342): keep where mask alpha > cut1, and
+   *  optionally drop where the second mask's alpha > cut2 (wood under the stone layer). */
+  cut?: { cut1: number; mask2?: { sp: AtlasSprite; masks: WebGLTexture[]; cut2: number } };
+  /** Plan markers draw on top of FOW (KM_RenderTerrain.pas:890-891). */
+  noFow?: boolean;
+}
+
+/** Bind a mask sheet (unit 1 = tint/cut mask, unit 3 = the second build-stage mask). */
+function bindMaskUnit(unit: 1 | 3, atlasData: Atlas, masks: WebGLTexture[], sp: AtlasSprite): void {
+  const ms = atlasData.maskSheets[sp.ms]!;
+  gl!.activeTexture(gl!.TEXTURE0 + unit);
+  gl!.bindTexture(gl!.TEXTURE_2D, masks[sp.ms]!);
+  if (unit === 1) {
+    gl!.uniform1i(uS.maskTex, 1);
+    gl!.uniform4f(uS.maskRect, sp.mx, sp.my, sp.w, sp.h);
+    gl!.uniform2f(uS.maskSheet, ms.w, ms.h);
+  } else {
+    gl!.uniform1i(uS.mask2Tex, 3);
+    gl!.uniform4f(uS.mask2Rect, sp.mx, sp.my, sp.w, sp.h);
+    gl!.uniform2f(uS.mask2Sheet, ms.w, ms.h);
+  }
+}
+
 function drawSpriteIn(
   atlasData: Atlas,
   tex: WebGLTexture[],
@@ -1115,28 +1332,64 @@ function drawSpriteIn(
   wy: number,
   tint: [number, number, number],
   useMask: boolean,
+  opts?: SpriteDrawOpts,
 ): void {
   const sheet = atlasData.sheets[sp.s]!;
-  gl!.uniform2f(uS.world, wx, wy);
-  gl!.uniform2f(uS.size, sp.w, sp.h);
+  const quad = opts?.quad ?? { x: wx, y: wy, w: sp.w, h: sp.h };
+  gl!.uniform2f(uS.world, quad.x, quad.y);
+  gl!.uniform2f(uS.size, quad.w, quad.h);
+  if (opts?.corners !== undefined) {
+    gl!.uniform1f(uS.quadMode, 1);
+    const wp = new Float32Array(8);
+    for (let i = 0; i < 4; i++) {
+      wp[i * 2] = opts.corners[i]![0];
+      wp[i * 2 + 1] = opts.corners[i]![1];
+    }
+    gl!.uniform2fv(uS.wp, wp);
+  } else {
+    gl!.uniform1f(uS.quadMode, 0);
+  }
   gl!.uniform4f(uS.rect, sp.x, sp.y, sp.w, sp.h);
   gl!.uniform2f(uS.sheet, sheet.w, sheet.h);
   gl!.activeTexture(gl!.TEXTURE0);
   gl!.bindTexture(gl!.TEXTURE_2D, tex[sp.s]!);
   gl!.uniform1i(uS.tex, 0);
 
+  // Custom per-corner UVs (fences/markups): uniform state persists, so always reset it.
+  if (opts?.customUV !== undefined) {
+    gl!.uniform1f(uS.customUV, 1);
+    const uv = new Float32Array(8);
+    for (let i = 0; i < 4; i++) {
+      uv[i * 2] = opts.customUV[i]![0];
+      uv[i * 2 + 1] = opts.customUV[i]![1];
+    }
+    gl!.uniform2fv(uS.uv, uv);
+  } else {
+    gl!.uniform1f(uS.customUV, 0);
+  }
+
+  // Build-stage alpha cut: the sprite's own mask (+ optional second mask).
+  gl!.uniform1f(uS.cutMode, 0);
+  gl!.uniform1f(uS.hasCut2, 0);
+  const cut = opts?.cut;
+  if (cut !== undefined && sp.ms >= 0 && sp.ms < masks.length) {
+    bindMaskUnit(1, atlasData, masks, sp);
+    gl!.uniform1f(uS.cutMode, 1);
+    gl!.uniform1f(uS.cut1, cut.cut1);
+    const m2 = cut.mask2;
+    if (m2 !== undefined && m2.sp.ms >= 0 && m2.sp.ms < m2.masks.length) {
+      bindMaskUnit(3, atlasData, m2.masks, m2.sp);
+      gl!.uniform1f(uS.hasCut2, 1);
+      gl!.uniform1f(uS.cut2, m2.cut2);
+    }
+  }
+
   const hasMask = useMask && sp.ms >= 0 && sp.ms < masks.length;
   gl!.uniform1f(uS.hasMask, hasMask ? 1 : 0);
-  if (hasMask) {
-    const ms = atlasData.maskSheets[sp.ms]!;
-    gl!.activeTexture(gl!.TEXTURE1);
-    gl!.bindTexture(gl!.TEXTURE_2D, masks[sp.ms]!);
-    gl!.uniform1i(uS.maskTex, 1);
-    gl!.uniform4f(uS.maskRect, sp.mx, sp.my, sp.w, sp.h);
-    gl!.uniform2f(uS.maskSheet, ms.w, ms.h);
-  }
+  if (hasMask) bindMaskUnit(1, atlasData, masks, sp);
+
   gl!.uniform3f(uS.tint, tint[0], tint[1], tint[2]);
-  gl!.uniform1f(uS.fowOn, fowOn && fowTex !== null ? 1 : 0);
+  gl!.uniform1f(uS.fowOn, opts?.noFow !== true && fowOn && fowTex !== null ? 1 : 0);
   gl!.drawArrays(gl!.TRIANGLE_STRIP, 0, 4);
 }
 
@@ -1246,15 +1499,9 @@ function drawUnitEntity(u: EconUnit, sp: AtlasSprite, a: { x: number; y: number 
 // ---- houses (M3 spec 2.9) ----------------------------------------------------
 /** Complete house sprite + corner: stone sprite, CornerX/CornerY (KM_RenderPool.pas:767-776). */
 function houseSpriteOf(h: EconHouse): { sp: AtlasSprite; cornerX: number; cornerY: number } | null {
-  if (housesAtlas === null) return null;
   const spec = houseSpecs[h.typeId];
   if (spec === undefined) return null;
-  let sp = houseByI.get(spec.stonePic); // complete houses draw the stone sprite
-  if (sp === undefined) sp = houseByI.get(spec.woodPic);
-  if (sp === undefined) return null;
-  const cornerX = (h.x - 1) * CELL + sp.px;
-  const cornerY = (h.y - 1) * CELL + sp.py + sp.h - cornerHeight(h.x, h.y + 1) * PX_PER_HEIGHT;
-  return { sp, cornerX, cornerY };
+  return housePicAt(spec.stonePic, h) ?? housePicAt(spec.woodPic, h); // complete houses draw the stone sprite
 }
 
 /** Ware count of one house ware slot: EconHouse.wareIn/Out are per-slot (4) like the game's
@@ -1389,6 +1636,472 @@ function drawHouseRing(h: EconHouse): void {
   if (hs === null) return;
   const rw = Math.min(220, Math.max(60, hs.sp.w * 0.8));
   drawRingAt(hs.cornerX + hs.sp.w / 2, hs.cornerY + hs.sp.h - 6, rw, rw / 2);
+}
+
+// ---- M5 construction (docs/M5-SPIKE.md sections 2.2, 2.3, 3, 5) --------------
+/** The world's construction API probe (duck-typed: worker K's construction.ts lands in parallel). */
+function constructionProbe(): ConstructionProbe | null {
+  return world === null ? null : (world as unknown as ConstructionProbe);
+}
+
+function numField(o: Record<string, unknown>, names: string[]): number | null {
+  for (const n of names) {
+    const v = o[n];
+    if (typeof v === 'number' && Number.isFinite(v)) return v;
+  }
+  return null;
+}
+
+/** hbsNoGlyph/hbsWood/hbsStone/hbsDone (KM_Defaults.pas:762) from a name or the ordinal. */
+function phaseFromRaw(raw: unknown): BuildPhase {
+  if (typeof raw === 'string') {
+    const s = raw.toLowerCase();
+    if (s.includes('noglyph') || s.includes('dig')) return 'digging';
+    if (s.includes('wood')) return 'wood';
+    if (s.includes('stone')) return 'stone';
+    if (s.includes('done') || s.includes('complete')) return 'done';
+    return 'unknown';
+  }
+  if (typeof raw === 'number' && Number.isFinite(raw)) {
+    if (raw === HBS_DIGGING) return 'digging';
+    if (raw === HBS_WOOD) return 'wood';
+    if (raw === HBS_STONE) return 'stone';
+    if (raw === HBS_DONE) return 'done';
+  }
+  return 'unknown';
+}
+
+/** One HousePlan of section 3 ({uid, typeId, x, y, status, workerUid}); closed slots are skipped. */
+function normalizePlan(item: unknown): HousePlanView | null {
+  if (item === null || typeof item !== 'object') return null;
+  const o = item as Record<string, unknown>;
+  const typeId = numField(o, ['typeId', 'houseType', 'type']);
+  const x = numField(o, ['x', 'locX']);
+  const y = numField(o, ['y', 'locY']);
+  if (typeId === null || x === null || y === null) return null;
+  if (typeId === HT_NONE) return null; // htNone = the closed slot (ClosePlan, KM_HandConstructions.pas:741-747)
+  const status = typeof o['status'] === 'string' ? o['status'] : typeof o['jobStatus'] === 'string' ? o['jobStatus'] : 'open';
+  if (status === 'empty' || status === 'closed') return null;
+  return { uid: numField(o, ['uid']) ?? 0, typeId, x, y, status, workerUid: numField(o, ['workerUid', 'worker']) ?? 0 };
+}
+
+/** TKMFieldType as a code + name (construction.ts stores the name: 'none' | 'road' | 'corn' | 'wine'). */
+function fieldTypeCode(v: unknown): { code: number; name: string } {
+  if (typeof v === 'string') {
+    const s = v.toLowerCase();
+    if (s === 'road') return { code: FT_ROAD, name: 'road' };
+    if (s === 'corn') return { code: FT_CORN, name: 'corn' };
+    if (s === 'wine') return { code: FT_WINE, name: 'wine' };
+    return { code: 0, name: s };
+  }
+  if (typeof v === 'number' && Number.isFinite(v)) {
+    const name = v === FT_ROAD ? 'road' : v === FT_CORN ? 'corn' : v === FT_WINE ? 'wine' : 'none';
+    return { code: v, name };
+  }
+  return { code: 0, name: 'none' };
+}
+
+/** One FieldPlan ({x, y, fieldType, ...}); ftNone slots are skipped (GetFields, :437-457). */
+function normalizeFieldPlan(item: unknown): FieldPlanView | null {
+  if (item === null || typeof item !== 'object') return null;
+  const o = item as Record<string, unknown>;
+  const x = numField(o, ['x', 'locX']);
+  const y = numField(o, ['y', 'locY']);
+  if (x === null || y === null) return null;
+  const ft = fieldTypeCode(o['fieldType'] ?? o['type'] ?? o['ft']);
+  if (ft.code === 0) return null; // ftNone
+  const status = typeof o['status'] === 'string' ? o['status'] : typeof o['jobStatus'] === 'string' ? o['jobStatus'] : 'open';
+  if (status === 'empty' || status === 'closed') return null;
+  return { x, y, fieldType: ft.code, fieldTypeName: ft.name, status, workerUid: numField(o, ['workerUid', 'worker']) ?? 0 };
+}
+
+/** The hand's ConstructionState ({plans, fields, sites}, section 3) from the world's probe.
+ *  Cached per tick + hand (the render walks every house); invalidated by placement/tick changes. */
+let constructionCacheTick = -1;
+let constructionCacheHand = -1;
+let constructionCacheState: ConstructionStateView | null = null;
+
+function invalidateConstruction(): void {
+  constructionCacheTick = -1;
+  constructionCacheHand = -1;
+  constructionCacheState = null;
+}
+
+function constructionStateOf(hand: number): ConstructionStateView | null {
+  const tick = world === null ? -1 : world.tickCount;
+  if (tick === constructionCacheTick && hand === constructionCacheHand) return constructionCacheState;
+  constructionCacheTick = tick;
+  constructionCacheHand = hand;
+  constructionCacheState = readConstructionState(hand);
+  return constructionCacheState;
+}
+
+function readConstructionState(hand: number): ConstructionStateView | null {
+  const probe = constructionProbe();
+  if (probe === null) return null;
+  let raw: unknown = undefined;
+  if (typeof probe.constructionState === 'function') raw = probe.constructionState(hand);
+  else if (typeof probe.constructionOf === 'function') raw = probe.constructionOf(hand);
+  else if (Array.isArray(probe.constructions)) raw = (probe.constructions as unknown[])[hand];
+  else if (Array.isArray(probe.construction)) raw = (probe.construction as unknown[])[hand];
+  else raw = probe.construction;
+  if (raw === null || raw === undefined || typeof raw !== 'object') return null;
+  const o = raw as Record<string, unknown>;
+  const plans = Array.isArray(o['plans']) ? o['plans'].map(normalizePlan).filter((p): p is HousePlanView => p !== null) : [];
+  const fields = Array.isArray(o['fields']) ? o['fields'].map(normalizeFieldPlan).filter((f): f is FieldPlanView => f !== null) : [];
+  const sites = Array.isArray(o['sites']) ? o['sites'] : [];
+  const locks = o['locks'] !== null && typeof o['locks'] === 'object' ? (o['locks'] as Record<string, unknown>)['unlocked'] : undefined;
+  const unlocked = Array.isArray(locks) ? locks.map((v) => v === true) : null;
+  return { plans, fields, sites, unlocked };
+}
+
+/** Site records by house uid (the sites list may carry the build fields, section 3). */
+function siteInfoByUid(hand: number): Map<number, Record<string, unknown>> {
+  const out = new Map<number, Record<string, unknown>>();
+  const state = constructionStateOf(hand);
+  if (state === null) return out;
+  for (const s of state.sites) {
+    if (s === null || typeof s !== 'object') continue;
+    const o = s as Record<string, unknown>;
+    const uid = numField(o, ['uid', 'houseUid']);
+    if (uid !== null) out.set(uid, o);
+  }
+  return out;
+}
+
+function buildInfoFromFields(o: Record<string, unknown>, extraNames: string[] = []): BuildInfo {
+  const raw = o['buildState'] ?? o['buildingState'] ?? o['buildPhase'] ?? (extraNames.length > 0 ? o[extraNames[0]!] : undefined) ?? null;
+  const progress = numField(o, ['buildingProgress', 'buildProgress']);
+  const woodDelivered = numField(o, ['buildWoodDelivered', 'woodDelivered', 'buildDeliveredWood', 'deliveredWood']);
+  const stoneDelivered = numField(o, ['buildStoneDelivered', 'stoneDelivered', 'buildDeliveredStone', 'deliveredStone']);
+  const woodSupply = numField(o, ['buildSupplyWood', 'supplyWood', 'woodSupply']);
+  const stoneSupply = numField(o, ['buildSupplyStone', 'supplyStone', 'stoneSupply']);
+  const rawOut = typeof raw === 'string' || typeof raw === 'number' ? raw : null;
+  return { phase: phaseFromRaw(raw), raw: rawOut, progress, woodDelivered, stoneDelivered, woodSupply, stoneSupply };
+}
+
+/** Build info of a house: its own additive fields first, the hand's site record as fallback. */
+function buildInfoOf(h: EconHouse): BuildInfo {
+  const own = buildInfoFromFields(h as unknown as Record<string, unknown>);
+  if (own.phase !== 'unknown') return withDerivedSupply(h, own);
+  const site = siteInfoByUid(h.owner).get(h.uid);
+  if (site === undefined) return own;
+  return withDerivedSupply(h, buildInfoFromFields(site, ['state']));
+}
+
+/**
+ * Remaining pile counts (AddHouseBuildSupply reads fBuildSupplyWood/Stone, KM_Houses.pas:2406/2411):
+ * the sim's own supply fields win, else derived from the delivered counters and the consumed
+ * Ceil(progress/50) (GetBuildWoodDelivered/GetBuildStoneDelivered, :1197-1216).
+ */
+function withDerivedSupply(h: EconHouse, info: BuildInfo): BuildInfo {
+  const spec = houseSpecs[h.typeId];
+  if (spec === undefined || info.progress === null) return info;
+  const consumedWood = Math.ceil(info.progress / 50);
+  let woodSupply = info.woodSupply;
+  let stoneSupply = info.stoneSupply;
+  if (woodSupply === null && info.woodDelivered !== null) {
+    woodSupply = info.phase === 'wood' ? Math.max(0, info.woodDelivered - consumedWood) : 0;
+  }
+  if (stoneSupply === null && info.stoneDelivered !== null) {
+    stoneSupply = info.phase === 'stone' ? Math.max(0, info.stoneDelivered - Math.max(0, consumedWood - spec.woodCost)) : 0;
+  }
+  return { ...info, woodSupply, stoneSupply };
+}
+
+function clamp01(v: number): number {
+  return v < 0 ? 0 : v > 1 ? 1 : v;
+}
+
+/** One house picture sprite + corner (KM_RenderPool.pas:767-776 CornerX/CornerY). */
+function housePicAt(pic: number, h: EconHouse): { sp: AtlasSprite; cornerX: number; cornerY: number } | null {
+  if (housesAtlas === null) return null;
+  const sp = houseByI.get(pic);
+  if (sp === undefined) return null;
+  const cornerX = (h.x - 1) * CELL + sp.px;
+  const cornerY = (h.y - 1) * CELL + sp.py + sp.h - cornerHeight(h.x, h.y + 1) * PX_PER_HEIGHT;
+  return { sp, cornerX, cornerY };
+}
+
+/**
+ * A WIP house (KM_Houses.pas:2395-2435 + KM_RenderPool.pas:760-824): the wood layer at
+ * progress = progress/50/WoodCost cut into the sprite's mask; the stone stage draws the full wood
+ * layer minus the stone coverage, then the stone layer cut at 1 - stoneProgress.
+ */
+function drawHouseWip(h: EconHouse, info: BuildInfo): void {
+  if (housesAtlas === null) return;
+  const spec = houseSpecs[h.typeId];
+  if (spec === undefined) return;
+  const progress = info.progress ?? 0;
+  if (info.phase === 'wood') {
+    const wood = housePicAt(spec.woodPic, h);
+    if (wood === null) return;
+    const p = spec.woodCost > 0 ? clamp01(progress / 50 / spec.woodCost) : 1;
+    if (p <= 0) return; // RenderSpriteAlphaTest exits when both progress steps are 0
+    drawSpriteIn(housesAtlas, houseTex, houseMaskTex, wood.sp, wood.cornerX, wood.cornerY, WHITE, false, { cut: { cut1: 1 - p } });
+    return;
+  }
+  if (info.phase === 'stone') {
+    const wood = housePicAt(spec.woodPic, h);
+    const stone = housePicAt(spec.stonePic, h);
+    const p = spec.stoneCost > 0 ? clamp01((progress / 50 - spec.woodCost) / spec.stoneCost) : 1;
+    // The game pairs the wood sprite with its stone child: wood everywhere except where the stone
+    // layer already shows (RenderSpriteAlphaTest's second mask, KM_RenderPool.pas:1296-1313).
+    if (wood !== null) {
+      const mask2 = stone !== null ? { sp: stone.sp, masks: houseMaskTex, cut2: 1 - p } : undefined;
+      drawSpriteIn(housesAtlas, houseTex, houseMaskTex, wood.sp, wood.cornerX, wood.cornerY, WHITE, false, { cut: { cut1: 0, mask2 } });
+    }
+    if (stone !== null && p > 0) {
+      drawSpriteIn(housesAtlas, houseTex, houseMaskTex, stone.sp, stone.cornerX, stone.cornerY, WHITE, false, { cut: { cut1: 1 - p } });
+    }
+  }
+}
+
+/** Build supply piles (KM_RenderPool.pas:716-743): 260+n-1 wood / 267+n-1 stone at the BuildSupply
+ *  offsets relative to the house Loc, ground at the Loc.Y+1 corner height. */
+function drawBuildSupply(h: EconHouse, info: BuildInfo): void {
+  if (housesAtlas === null) return;
+  const rows = buildSupply[h.typeId];
+  if (rows === undefined) return;
+  const draw = (pic: number, n: number | null, row: { x: number; y: number }[]): void => {
+    if (n === null) return;
+    const count = Math.max(0, Math.min(BUILD_SUPPLY_MAX, Math.floor(n)));
+    if (count <= 0) return;
+    const sp = houseByI.get(pic + count - 2); // game id = pic + count - 1; atlas i = game id - 1
+    if (sp === undefined) return;
+    const off = row[count - 1]!;
+    const cx = (h.x - 1) * CELL + off.x;
+    const cy = (h.y - 1) * CELL + off.y + sp.h - cornerHeight(h.x, h.y + 1) * PX_PER_HEIGHT;
+    drawSpriteIn(housesAtlas!, houseTex, houseMaskTex, sp, cx, cy, WHITE, false);
+  };
+  draw(SUPPLY_WOOD_PIC, info.woodSupply, rows[0]!);
+  draw(SUPPLY_STONE_PIC, info.stoneSupply, rows[1]!);
+}
+
+type FenceKind = 'plan' | 'site';
+
+/** RenderFence sprite ids (KM_RenderTerrain.pas:1351-1357): N/S = horizontal, E/W = vertical. */
+function fencePic(kind: FenceKind, dir: number): number {
+  const horizontal = dir === DIR_N || dir === DIR_S;
+  if (kind === 'plan') return horizontal ? GUI_ROPE_H : GUI_ROPE_V;
+  return horizontal ? GUI_SITE_FENCE_H : GUI_SITE_FENCE_V;
+}
+
+/**
+ * RenderFence (KM_RenderTerrain.pas:1341-1409) in world px: horizontal fences lay the sprite's
+ * long axis across the tile (the sprite width is the visible rope thickness); vertical fences crop
+ * the sprite height to the tile plus the terrain rise. dirS/dirW draw on the next tile (:1360-1361).
+ */
+function drawFence(kind: FenceKind, dir: number, tileX: number, tileY: number, noFow: boolean): void {
+  if (guiAtlas === null) return;
+  const pic = fencePic(kind, dir);
+  const sp = guiByI.get(pic - 1);
+  if (sp === undefined) return;
+  const sheet = guiAtlas.sheets[sp.s]!;
+  const u1 = sp.x / sheet.w;
+  const v1 = sp.y / sheet.h;
+  const u2 = (sp.x + sp.w) / sheet.w;
+  const v2 = (sp.y + sp.h) / sheet.h;
+
+  let x = tileX;
+  let y = tileY;
+  if (dir === DIR_S) y += 1;
+  if (dir === DIR_W) x += 1;
+
+  if (dir === DIR_N || dir === DIR_S) {
+    const y1 = (y - 1) * CELL - cornerHeight(x, y) * PX_PER_HEIGHT + FENCE_OVERLAP * PX_PER_HEIGHT;
+    const y2 = (y - 1) * CELL - cornerHeight(x + 1, y) * PX_PER_HEIGHT + FENCE_OVERLAP * PX_PER_HEIGHT;
+    const left = (x - 1) * CELL - 3;
+    const right = x * CELL + 3;
+    const corners: [number, number][] = [[left, y1], [right, y2 - sp.w], [left, y1 - sp.w], [right, y2]];
+    const uv: [number, number][] = [[u2, v1], [u1, v2], [u1, v1], [u2, v2]];
+    drawSpriteIn(guiAtlas, guiTex, [], sp, left, y1 - sp.w, WHITE, false, { corners, customUV: uv, noFow });
+    return;
+  }
+  const heightInPx = Math.round(CELL + (cornerHeight(x, y) - cornerHeight(x, y + 1)) * PX_PER_HEIGHT + FENCE_OVERLAP);
+  const uvB = v2 + (v1 - v2) * Math.min(1, heightInPx / sp.h);
+  const y1 = (y - 1) * CELL - cornerHeight(x, y) * PX_PER_HEIGHT;
+  const y2 = y * CELL - cornerHeight(x, y + 1) * PX_PER_HEIGHT + FENCE_OVERLAP * PX_PER_HEIGHT;
+  const x1 = dir === DIR_W ? (x - 1) * CELL - 3 : (x - 1) * CELL + 3 - sp.w;
+  const corners: [number, number][] = [[x1, y1], [x1 + sp.w, y1], [x1, y2], [x1 + sp.w, y2]];
+  const uv: [number, number][] = [[u1, v1], [u2, v1], [u1, uvB], [u2, uvB]];
+  drawSpriteIn(guiAtlas, guiTex, [], sp, x1, y1, WHITE, false, { corners, customUV: uv, noFow });
+}
+
+/** WIP site cells: the BuildArea of every house that is not complete (AddHouseWIP ->
+ *  SetHouse(hsFence) locks them tlFenced/tlDigged, KM_Houses.pas:569 + KM_Terrain.pas:4641). */
+function siteFenceCells(): Set<number> {
+  const out = new Set<number>();
+  if (map === null || world === null) return out;
+  const stride = map.mapX + 1;
+  for (const h of world.houses) {
+    const info = buildInfoOf(h);
+    if (info.phase !== 'digging' && info.phase !== 'wood' && info.phase !== 'stone') continue;
+    const plan = housePlan(h.typeId);
+    for (let I = 1; I <= 4; I++) {
+      for (let K = 1; K <= 4; K++) {
+        if (plan[I - 1]![K - 1] === 0) continue;
+        const x = h.x + K - 3;
+        const y = h.y + I - 4;
+        if (x < 1 || y < 1 || x > map.mapX || y > map.mapY) continue;
+        out.add(y * stride + x);
+      }
+    }
+  }
+  return out;
+}
+
+/** Wooden fences around the WIP sites (KM_Terrain.pas:5007-5047 side bits + KM_RenderTerrain.pas:864-887). */
+function drawSiteFences(): void {
+  if (map === null || guiAtlas === null) return;
+  const cells = siteFenceCells();
+  if (cells.size === 0) return;
+  const mx = map.mapX;
+  const my = map.mapY;
+  const stride = mx + 1;
+  const inSite = (x: number, y: number): boolean => x >= 1 && y >= 1 && x <= mx && y <= my && cells.has(y * stride + x);
+  for (const idx of cells) {
+    const x = idx % stride;
+    const y = (idx - x) / stride;
+    // Side bits: 1 N, 2 E (the west edge), 4 W (the east edge), 8 S (KM_Terrain.pas:5044-5047).
+    if (!inSite(x, y - 1)) drawFence('site', DIR_N, x, y, false);
+    if (!inSite(x - 1, y)) drawFence('site', DIR_E, x, y, false);
+    if (!inSite(x + 1, y)) drawFence('site', DIR_W, x, y, false);
+    if (!inSite(x, y + 1)) drawFence('site', DIR_S, x, y, false);
+  }
+}
+
+/** Does any house have a WIP site (digging/wood/stone)? Gates the live-height scan below. */
+function hasWipSites(): boolean {
+  if (world === null) return false;
+  for (const h of world.houses) {
+    const phase = buildInfoOf(h).phase;
+    if (phase === 'digging' || phase === 'wood' || phase === 'stone') return true;
+  }
+  return false;
+}
+
+let terrainHeightStamp = -1;
+
+/** True when the sim's corner heights changed since the last terrain build (FlattenTerrain during
+ *  a house-area dig, KM_UnitTaskBuild.pas:731-740). Only scanned while a WIP site exists. */
+function terrainHeightsDirty(): boolean {
+  if (world === null) return false;
+  if (!hasWipSites()) return false;
+  const h = world.grid.height;
+  let sum = 0;
+  for (let i = 0; i < h.length; i++) sum = (sum * 31 + h[i]!) | 0;
+  if (sum === terrainHeightStamp) return false;
+  terrainHeightStamp = sum;
+  return true;
+}
+
+/** House plan rope outlines (GetOutlines, KM_HandConstructions.pas:873-906): one rope per exposed
+ *  BuildArea cell edge; plan markings draw on top of FOW (KM_RenderTerrain.pas:890-901). */
+function drawPlanOutlines(plans: HousePlanView[]): void {
+  if (guiAtlas === null) return;
+  for (const p of plans) {
+    const plan = housePlan(p.typeId);
+    for (let J = 1; J <= 4; J++) {
+      for (let K = 1; K <= 4; K++) {
+        if (plan[J - 1]![K - 1] === 0) continue;
+        const x = p.x + K - 3;
+        const y = p.y + J - 4;
+        const up = J === 1 ? 0 : plan[J - 2]![K - 1]!;
+        const left = K === 1 ? 0 : plan[J - 1]![K - 2]!;
+        const down = J === 4 ? 0 : plan[J]![K - 1]!;
+        const right = K === 4 ? 0 : plan[J - 1]![K]!;
+        if (up === 0) drawFence('plan', DIR_N, x, y, true);
+        if (left === 0) drawFence('plan', DIR_E, x, y, true);
+        if (down === 0) drawFence('plan', DIR_S, x, y, true);
+        if (right === 0) drawFence('plan', DIR_W, x, y, true);
+      }
+    }
+  }
+}
+
+/** TabletSpriteId of a script id through HOUSE_ID_TO_TYPE (HOUSE_DAT_X is TKMHouseType indexed). */
+function tabletIconOf(typeId: number): number {
+  const type = typeId >= 0 && typeId < HOUSE_ID_TO_TYPE.length ? HOUSE_ID_TO_TYPE[typeId]! : -1;
+  const idx = type - 2;
+  if (idx < 0 || idx >= TABLET_ICON_BY_TYPE.length) return -1;
+  return TABLET_ICON_BY_TYPE[idx]!;
+}
+
+/** House plan tablet (AddHouseTablet, KM_RenderPool.pas:698-712): the house type's GUI icon at the
+ *  plan entrance (Loc.X + EntranceOffsetX, GetTablets KM_HandConstructions.pas:909-922). */
+function drawPlanTablet(p: HousePlanView): { y: number; run: () => void } | null {
+  if (guiAtlas === null) return null;
+  const spec = houseSpecs[p.typeId];
+  const icon = tabletIconOf(p.typeId);
+  if (spec === undefined || icon < 0) return null;
+  const sp = guiByI.get(icon - 1);
+  if (sp === undefined) return null;
+  const ex = p.x + spec.entranceDx;
+  const ey = p.y;
+  const gx = (ex - 1) * CELL + sp.px + sp.w / 2 + 20;
+  const gy = (ey - 1) * CELL + sp.py + sp.h + 22;
+  const cornerX = (ex - 1) * CELL + sp.px + 30;
+  const cornerY = (ey - 1) * CELL + sp.py + sp.h + 18 - terrainHeightPx(gx, gy);
+  return { y: gy, run: () => drawSpriteIn(guiAtlas!, guiTex, [], sp, cornerX, cornerY, WHITE, false, { noFow: true }) };
+}
+
+/** Field plan markup (RenderMarkup, KM_RenderTerrain.pas:1412-1439): two terrain-following quads
+ *  per planned tile, the sprite laid across the tile (road rope / corn / wine sprites). */
+function drawFieldMarkup(x: number, y: number, fieldType: number): void {
+  if (guiAtlas === null) return;
+  const pic = fieldType === FT_ROAD ? GUI_MARKUP_ROAD : fieldType === FT_CORN ? GUI_MARKUP_CORN : fieldType === FT_WINE ? GUI_MARKUP_WINE : 0;
+  if (pic === 0) return;
+  const sp = guiByI.get(pic - 1);
+  if (sp === undefined) return;
+  const sheet = guiAtlas.sheets[sp.s]!;
+  const u1 = sp.x / sheet.w;
+  const v1 = sp.y / sheet.h;
+  const u2 = (sp.x + sp.w) / sheet.w;
+  const v2 = (sp.y + sp.h) / sheet.h;
+  const yTL = (y - 1) * CELL - cornerHeight(x, y) * PX_PER_HEIGHT;
+  const yBR = y * CELL - cornerHeight(x + 1, y + 1) * PX_PER_HEIGHT;
+  const yBL = y * CELL - cornerHeight(x, y + 1) * PX_PER_HEIGHT;
+  const yTR = (y - 1) * CELL - cornerHeight(x + 1, y) * PX_PER_HEIGHT;
+  const left = (x - 1) * CELL;
+  const right = x * CELL;
+  const uv: [number, number][] = [[u2, v1], [u1, v2], [u1, v1], [u2, v2]];
+  // The game's +0.10 / -0.15 / -0.25 tile-unit insets (x40 px), split into two quads.
+  drawSpriteIn(guiAtlas, guiTex, [], sp, left, yTL, WHITE, false, {
+    corners: [[left, yTL + 4], [right, yBR - 10], [left, yTL - 6], [right, yBR]],
+    customUV: uv,
+    noFow: true,
+  });
+  drawSpriteIn(guiAtlas, guiTex, [], sp, left, yBL, WHITE, false, {
+    corners: [[left, yBL], [right, yTR - 6], [left, yBL - 10], [right, yTR + 4]],
+    customUV: uv,
+    noFow: true,
+  });
+}
+
+/** Plan marker statistics of the last frame (CDP observability). */
+let planMarkerStats = { plans: 0, fields: 0, ropes: 0, tablets: 0 };
+
+/** The human's plan markers: field markups + rope outlines draw immediately (terrain layer), the
+ *  tablets join the sprite painter list (KM_RenderPool.pas:301-323 + 504-517). */
+function drawPlanMarkers(): { y: number; run: () => void }[] {
+  const out: { y: number; run: () => void }[] = [];
+  const state = constructionStateOf(humanHand());
+  planMarkerStats = { plans: 0, fields: 0, ropes: 0, tablets: 0 };
+  if (state === null) return out;
+  planMarkerStats.plans = state.plans.length;
+  planMarkerStats.fields = state.fields.length;
+  for (const f of state.fields) drawFieldMarkup(f.x, f.y, f.fieldType);
+  drawPlanOutlines(state.plans);
+  planMarkerStats.ropes = state.plans.length; // one outline pass per plan (the rope count is per edge)
+  for (const p of state.plans) {
+    const t = drawPlanTablet(p);
+    if (t !== null) {
+      out.push(t);
+      planMarkerStats.tablets++;
+    }
+  }
+  return out;
 }
 
 // ---- terrain objects: trees, stumps, falling trees (M3 spec 2.4/2.9) --------
@@ -1609,6 +2322,9 @@ function counts(): Record<string, number> {
     sawmillTimber,
     storeTrunks,
     events: w.events.length,
+    // M5: the live road count (mission streets + roads built at runtime; KM_Terrain SetRoad).
+    roads: w.roadTileCount,
+    digs: digTiles.size,
   };
 }
 
@@ -1635,6 +2351,17 @@ function render(): void {
   ensureScan();
   updateFowTexture();
 
+  // M5: rebuild the terrain VBO when the sim flattened a WIP site (live corner heights). The scan
+  // runs only while a site is being dug/built, so complete villages cost nothing.
+  if (terrainHeightsDirty()) buildTerrainVbo(tilesByI);
+
+  // M5: refresh the road overlay when the sim's road count changed (builders build roads at runtime).
+  const roadCount = world === null ? -1 : world.roadTileCount;
+  if (roadCount !== lastRoadTileCount) {
+    lastRoadTileCount = roadCount;
+    buildOverlayVbo();
+  }
+
   // Terrain: one drawElements (M1 renderer) + the overlay pass (roads + digs; M3 spec 2.9).
   // M4: the revelation texture multiplies the pass when FOW is on (KM_RenderTerrain.pas:1052-1119).
   gl!.useProgram(terrainProg);
@@ -1659,6 +2386,27 @@ function render(): void {
     gl!.drawElements(gl!.TRIANGLES, overlayIndexCount, gl!.UNSIGNED_INT, 0);
   }
   gl!.bindVertexArray(null);
+
+  // M5: the construction layer (WIP site fences + the human's plan markers), drawn in the terrain
+  // layer before the sprite painter list like the game (KM_RenderPool.pas:301-323, 504-517).
+  let planTablets: { y: number; run: () => void }[] = [];
+  if (quadVao !== null && map !== null) {
+    gl!.useProgram(spriteProg);
+    gl!.uniform2f(uS.cam, camX, camY);
+    gl!.uniform1f(uS.zoom, zoom);
+    gl!.uniform2f(uS.view, viewW, viewH);
+    gl!.uniform2f(uS.mapCells, map.mapX, map.mapY);
+    gl!.uniform1f(uS.cell, CELL);
+    if (fowTex !== null) {
+      gl!.activeTexture(gl!.TEXTURE2);
+      gl!.bindTexture(gl!.TEXTURE_2D, fowTex);
+      gl!.uniform1i(uS.fow, 2);
+    }
+    gl!.bindVertexArray(quadVao);
+    drawSiteFences();
+    planTablets = drawPlanMarkers();
+    gl!.bindVertexArray(null);
+  }
 
   // Sprites: rings first, then every entity sorted by its ground line (painter's order).
   const drawn = { units: 0, houses: 0, objects: 0, projectiles: 0, missing: 0 };
@@ -1698,6 +2446,11 @@ function render(): void {
     const selH = selectedHouse();
     if (selH !== null) drawHouseRing(selH);
 
+    // M5: the plan-placement cursor marker (the tile the next click would use).
+    if (buildMode !== 'none' && hoverX >= 1 && hoverY >= 1) {
+      drawRingAt((hoverX - 0.5) * CELL, (hoverY - 0.5) * CELL, 44, 22);
+    }
+
     const stride = map.mapX + 1;
     const tick = world === null ? 0 : world.tickCount;
     const list: { y: number; run: () => void }[] = [];
@@ -1733,6 +2486,19 @@ function render(): void {
 
     for (const h of houses) {
       if (houseDestroyed(h)) continue; // demolished; the sim deletes it a tick later
+      const info = buildInfoOf(h);
+      if (info.phase === 'digging') continue; // hbsNoGlyph: invisible (the site fence is drawn above)
+      if (info.phase === 'wood' || info.phase === 'stone') {
+        const spec = houseSpecs[h.typeId];
+        const pic = info.phase === 'wood' ? spec?.woodPic : spec?.stonePic;
+        const anchor = pic === undefined ? null : housePicAt(pic, h);
+        if (anchor === null) {
+          drawn.missing++;
+          continue;
+        }
+        list.push({ y: anchor.cornerY + anchor.sp.h, run: () => { drawHouseWip(h, info); drawBuildSupply(h, info); drawn.houses++; } });
+        continue;
+      }
       const hs = houseSpriteOf(h);
       if (hs === null) {
         drawn.missing++;
@@ -1740,6 +2506,9 @@ function render(): void {
       }
       list.push({ y: hs.cornerY + hs.sp.h, run: () => drawHouseEntity(h, drawn) });
     }
+
+    // M5: plan tablets sort with the sprites (the game adds them to the render list, KM_RenderPool.pas:504-517).
+    for (const t of planTablets) list.push(t);
 
     for (const u of units) {
       if (u.inside) continue; // invisible inside a house (spec 2.6)
@@ -1850,10 +2619,31 @@ function updateHud(): void {
       if (n > 0) stock.push(`${WARE_NAMES[ware] ?? ware}\u00d7${n}`);
     }
     lines.push(`house=${sh.uid} ${name} owner=${sh.owner} state=${sh.state} worker=${sh.workerUid} in=[${inPart.join(' ')}] out=[${outPart.join(' ')}]`);
+    // M5: the build state of the selected house (digging/wood/stone/done) + progress + piles.
+    const binfo = buildInfoOf(sh);
+    if (binfo.phase !== 'unknown') {
+      const maxProg = spec === undefined ? null : (spec.woodCost + spec.stoneCost) * 50;
+      const pct = binfo.progress !== null && maxProg !== null ? ` progress=${binfo.progress}/${maxProg}` : '';
+      const sup = binfo.woodSupply !== null || binfo.stoneSupply !== null ? ` supply wood=${binfo.woodSupply ?? '-'} stone=${binfo.stoneSupply ?? '-'}` : '';
+      lines.push(`house build: ${binfo.phase}${pct}${sup}`);
+    }
     const hp = houseHealthOf(sh);
     const fires = houseFireCount(sh);
     if (hp !== null && spec !== undefined) lines.push(`house hp=${hp}/${spec.maxHealth} fires=${fires}`);
     lines.push(`house stock: ${stock.join(' ') || '-'}`);
+  }
+
+  // M5: the human's plans + the placement mode (B house / V road / C corn).
+  if (world !== null) {
+    const state = constructionStateOf(humanHand());
+    const nPlans = state === null ? 0 : state.plans.length;
+    const nFields = state === null ? 0 : state.fields.length;
+    lines.push(`plans: houses=${nPlans} fields=${nFields} (hand ${humanHand()})`);
+    if (buildMode === 'house') {
+      const locked = state !== null && state.unlocked !== null && state.unlocked[buildType] !== true ? ' (locked)' : '';
+      lines.push(`build: house=${HOUSE_TYPE_NAMES[buildType] ?? buildType}${locked} [ ] cycle type \u00b7 click place \u00b7 right-click/Esc cancel`);
+    } else if (buildMode === 'road') lines.push('build: road \u00b7 click place \u00b7 right-click/Esc cancel');
+    else if (buildMode === 'corn') lines.push('build: corn field \u00b7 click place \u00b7 right-click/Esc cancel');
   }
 
   const ev = lastEvent();
@@ -2061,11 +2851,128 @@ function orderAt(vx: number, vy: number): void {
   orderWalkAt(vx, vy);
 }
 
+// ---- M5 plan placement (the human's build path) -----------------------------
+/** House types the [ ] cycle walks: every script id with a parsed spec (no htNone/market). */
+let buildableTypes: number[] = [];
+
+function toggleBuildMode(mode: BuildMode): void {
+  if (world === null) {
+    flashHud(); // static map: no sim to place plans into
+    return;
+  }
+  buildMode = buildMode === mode ? 'none' : mode;
+  updateHud();
+}
+
+function cycleBuildType(delta: number): void {
+  const list = buildableTypes;
+  if (list.length === 0) return;
+  let i = list.indexOf(buildType);
+  if (i < 0) i = 0;
+  i = (i + delta + list.length) % list.length;
+  buildType = list[i]!;
+  updateHud();
+}
+
+/** Viewer-side plan uid source. construction.ts stores HousePlan.uid but never reads it back
+ *  (:285-310); kept far above the sim's house uids so nothing collides. */
+let planUidCounter = 1_000_000;
+
+/** Place a house plan at the clicked tile (the entrance): the world's own wrapper when worker K
+ *  wires one, else the frozen section 3 module (construction.ts) with the world as the query host.
+ *  Entrance semantics: the game shifts by EntranceOffsetX before storing (KM_Hand.pas:1294-1301). */
+function addHousePlanAt(x: number, y: number): boolean {
+  const w = world;
+  if (w === null) {
+    flashHud();
+    return false;
+  }
+  const hand = humanHand();
+  const probe = w as unknown as ConstructionProbe;
+  try {
+    if (typeof probe.addHousePlan === 'function') {
+      if (typeof probe.canAddHousePlan === 'function') {
+        const can = probe.canAddHousePlan(hand, buildType, x, y);
+        if (can === false || can === 0 || (typeof can === 'object' && can !== null && (can as { ok?: unknown }).ok === false)) {
+          flashHud();
+          return false;
+        }
+      }
+      if (probe.addHousePlan(hand, buildType, x, y) === false) {
+        flashHud();
+        return false;
+      }
+    } else {
+      const queries = w as unknown as C.ConstructionQueries;
+      if (!C.canAddHousePlan(queries, hand, buildType, x, y)) {
+        flashHud();
+        return false;
+      }
+      C.addHousePlan(queries, hand, buildType, x, y, planUidCounter++);
+    }
+  } catch {
+    flashHud();
+    return false;
+  }
+  invalidateConstruction();
+  updateHud();
+  return true;
+}
+
+/** Place a field plan (road/corn) at a tile through the section 3 API. */
+function addFieldPlanAt(x: number, y: number, fieldType: number): boolean {
+  const w = world;
+  if (w === null) {
+    flashHud();
+    return false;
+  }
+  const hand = humanHand();
+  const name: C.FieldType = fieldType === FT_ROAD ? 'road' : fieldType === FT_CORN ? 'corn' : fieldType === FT_WINE ? 'wine' : 'none';
+  if (name === 'none') return false;
+  const probe = w as unknown as ConstructionProbe;
+  try {
+    if (typeof probe.addFieldPlan === 'function') {
+      if (probe.addFieldPlan(hand, x, y, name) === false) {
+        flashHud();
+        return false;
+      }
+    } else {
+      const queries = w as unknown as C.ConstructionQueries;
+      if (!C.canAddFieldPlan(queries, hand, x, y, name)) {
+        flashHud();
+        return false;
+      }
+      C.addFieldPlan(queries, hand, x, y, name);
+    }
+  } catch {
+    flashHud();
+    return false;
+  }
+  invalidateConstruction();
+  updateHud();
+  return true;
+}
+
+/** A left click in a placement mode: resolve the tile under the pointer and place the plan. */
+function placePlanAtViewport(vx: number, vy: number): boolean {
+  const r = cv.getBoundingClientRect();
+  const tile = tileAtPoint(vx - r.left, vy - r.top);
+  if (tile === null) return false;
+  if (buildMode === 'house') return addHousePlanAt(tile.x, tile.y);
+  if (buildMode === 'road') return addFieldPlanAt(tile.x, tile.y, FT_ROAD);
+  if (buildMode === 'corn') return addFieldPlanAt(tile.x, tile.y, FT_CORN);
+  return false;
+}
+
 function bindInput(): void {
   let downX = 0;
   let downY = 0;
   cv.addEventListener('pointerdown', (e) => {
     if (e.button === 2) {
+      if (buildMode !== 'none') {
+        buildMode = 'none'; // right-click cancels the placement mode (M5)
+        return;
+      }
       orderAt(e.clientX, e.clientY);
       return;
     }
@@ -2096,6 +3003,10 @@ function bindInput(): void {
     cv.classList.remove('drag');
     const r = cv.getBoundingClientRect();
     if (Math.hypot(e.clientX - downX, e.clientY - downY) < 5) {
+      if (buildMode !== 'none') {
+        placePlanAtViewport(e.clientX, e.clientY); // M5: a click places the plan, no selection
+        return;
+      }
       selectAt(e.clientX - r.left, e.clientY - r.top);
     }
   });
@@ -2135,8 +3046,33 @@ function bindInput(): void {
       togglePicker();
       return;
     }
+    // M5 plan placement: B house plans, V roads, C corn fields; [ ] or , . cycle the house type.
+    if (e.key === 'b' || e.key === 'B') {
+      e.preventDefault();
+      toggleBuildMode('house');
+      return;
+    }
+    if (e.key === 'v' || e.key === 'V') {
+      e.preventDefault();
+      toggleBuildMode('road');
+      return;
+    }
+    if (e.key === 'c' || e.key === 'C') {
+      e.preventDefault();
+      toggleBuildMode('corn');
+      return;
+    }
+    if (buildMode === 'house' && (e.key === '[' || e.key === ']' || e.key === ',' || e.key === '.')) {
+      e.preventDefault();
+      cycleBuildType(e.key === '[' || e.key === ',' ? -1 : 1);
+      return;
+    }
     if (e.key === 'Escape') {
       e.preventDefault();
+      if (buildMode !== 'none') {
+        buildMode = 'none';
+        return;
+      }
       closePicker();
       return;
     }
@@ -2278,12 +3214,18 @@ function resetMapState(): void {
   hoverX = -1;
   hoverY = -1;
   acc = 0;
+  // M5: plan placement + construction caches are per-map/world.
+  buildMode = 'none';
+  invalidateConstruction();
+  lastRoadTileCount = -1;
+  terrainHeightStamp = -1;
 }
 
 /** Build the VBOs + camera for the freshly installed map; a good load clears the error box. */
 function finishLoad(): void {
   buildTerrainVbo(tilesByI);
   buildOverlayVbo();
+  lastRoadTileCount = world === null ? -1 : world.roadTileCount; // M5: overlay is fresh
   viewW = cv.clientWidth;
   viewH = cv.clientHeight;
   resetView();
@@ -2314,6 +3256,16 @@ function buildStaticHouses(m: Mission): EconHouse[] {
       damage: 0,
       destroyed: false,
       fireLevel: 0,
+      // M5a additive construction fields (docs/M5-SPIKE.md section 2.2): mission houses are complete
+      // (KM_Houses.pas:562-565: a house placed on the map as built starts at hbsDone/MaxHealth).
+      buildState: 'done',
+      buildingProgress: spec !== undefined ? (spec.woodCost + spec.stoneCost) * 50 : 0,
+      buildSupplyWood: 0,
+      buildSupplyStone: 0,
+      buildReserve: 0,
+      readyToBeBuilt: false,
+      woodCost: spec !== undefined ? spec.woodCost : 0,
+      stoneCost: spec !== undefined ? spec.stoneCost : 0,
     });
   }
   return out;
@@ -2484,6 +3436,8 @@ function enableCombatWorld(): { ok: boolean; mode: string; reason?: string } {
   selectedUid = 0;
   selectedGroupUid = 0;
   selectedHouseUid = 0;
+  invalidateConstruction();
+  lastRoadTileCount = -1; // M5: the next render rebuilds the overlay with the live roads
   ensureScan();
   updateHud();
   return { ok: true, mode: 'economy' };
@@ -2915,17 +3869,111 @@ function installHook(): void {
     enableCombatWorld: () => enableCombatWorld(),
     /** Scripted skirmish (spawnGroup, else a synthetic-mission rebuild); returns the spawned groups. */
     scriptedFight: (plan?: FightPlan[]) => scriptedFight(plan),
+
+    // ---- M5 hooks (docs/M5-SPIKE.md section 5: construction state for the lead's proof) ----
+    /** The human's construction state: house plans + field plans (+ whether the sim API is live). */
+    plans: () => {
+      const hand = humanHand();
+      const state = constructionStateOf(hand);
+      return state === null
+        ? { hand, houses: [], fields: [], hasApi: constructionProbe() !== null }
+        : { hand, houses: state.plans.map((p) => ({ ...p })), fields: state.fields.map((f) => ({ ...f })), hasApi: true };
+    },
+    /** One house's build state: digging/wood/stone/done + progress, delivered wares and pile counts. */
+    houseBuildState: (uid: number) => {
+      const h = activeHouses().find((x) => x.uid === uid);
+      if (h === undefined) return null;
+      const info = buildInfoOf(h);
+      const spec = houseSpecs[h.typeId];
+      return {
+        uid,
+        typeId: h.typeId,
+        phase: info.phase,
+        raw: info.raw,
+        progress: info.progress,
+        woodCost: spec === undefined ? null : spec.woodCost,
+        stoneCost: spec === undefined ? null : spec.stoneCost,
+        maxProgress: spec === undefined ? null : (spec.woodCost + spec.stoneCost) * 50,
+        woodDelivered: info.woodDelivered,
+        stoneDelivered: info.stoneDelivered,
+        woodSupply: info.woodSupply,
+        stoneSupply: info.stoneSupply,
+      };
+    },
+    /** The supply pile counts of one house (what AddHouseBuildSupply draws). */
+    supplyCounts: (uid: number) => {
+      const h = activeHouses().find((x) => x.uid === uid);
+      if (h === undefined) return null;
+      const info = buildInfoOf(h);
+      return { wood: info.woodSupply ?? 0, stone: info.stoneSupply ?? 0 };
+    },
+    buildMode: () => buildMode,
+    /** Set the placement mode ('none' | 'house' | 'road' | 'corn'); returns the new mode. */
+    setBuildMode: (mode: string) => {
+      if (mode === 'none' || mode === 'house' || mode === 'road' || mode === 'corn') {
+        if (mode !== 'none' && world === null) {
+          flashHud();
+        } else {
+          buildMode = mode;
+        }
+      }
+      updateHud();
+      return buildMode;
+    },
+    buildType: () => buildType,
+    setBuildType: (id: number) => {
+      if (Number.isInteger(id) && id >= 0 && id < HOUSE_TYPE_NAMES.length) buildType = id;
+      updateHud();
+      return buildType;
+    },
+    buildTypes: () => buildableTypes.slice(),
+    /** canAddHousePlan probe (null when the sim API is absent or it throws). */
+    canPlaceHouse: (typeId: number, x: number, y: number) => {
+      const w = world;
+      if (w === null) return null;
+      const probe = w as unknown as ConstructionProbe;
+      try {
+        if (typeof probe.canAddHousePlan === 'function') {
+          const v = probe.canAddHousePlan(humanHand(), typeId, x, y);
+          return typeof v === 'boolean' ? v : Boolean(v);
+        }
+        return C.canAddHousePlan(w as unknown as C.ConstructionQueries, humanHand(), typeId, x, y);
+      } catch {
+        return null;
+      }
+    },
+    /** Place a house plan at the entrance tile (same path as a real click). */
+    placeHousePlan: (typeId: number, x: number, y: number) => {
+      const prev = buildType;
+      buildType = typeId;
+      const ok = addHousePlanAt(x, y);
+      buildType = prev;
+      return ok;
+    },
+    /** Place a road plan / corn field plan (same path as a real click). */
+    placeRoad: (x: number, y: number) => addFieldPlanAt(x, y, FT_ROAD),
+    placeCorn: (x: number, y: number) => addFieldPlanAt(x, y, FT_CORN),
+    /** WIP site cells the viewer fences (KM_Terrain UpdateFences on tlFenced/tlDigged). */
+    siteFenceCells: () => siteFenceCells().size,
+    /** Plan markers drawn in the last frame (plans/fields/tablets). */
+    planMarkers: () => ({ ...planMarkerStats }),
+    /** Force the road overlay to rebuild on the next frame (defensive if the sim's counter lags). */
+    refreshRoads: () => {
+      lastRoadTileCount = -1;
+      return true;
+    },
   };
   (window as unknown as Record<string, unknown>).__kamplay = hook;
 }
 
 // ---- boot -------------------------------------------------------------------
 async function boot(): Promise<void> {
-  const [tilesetData, unitsData, housesData, treesData, tilesText, mapelemBuf, unitdatBuf, housesBuf, mapsJson] = await Promise.all([
+  const [tilesetData, unitsData, housesData, treesData, guiData, tilesText, mapelemBuf, unitdatBuf, housesBuf, mapsJson] = await Promise.all([
     fetchJson<Atlas>('/out/atlas/Tileset.json'),
     fetchJson<Atlas>('/out/atlas/Units.json'),
     fetchJson<Atlas>('/out/atlas/Houses.json'),
     fetchJson<Atlas>('/out/atlas/Trees.json'),
+    fetchJson<Atlas>('/out/atlas/GUI.json'),
     fetchText('/defines/tiles.json'),
     fetchBytes('/defines/mapelem.dat'),
     fetchBytes('/defines/unit.dat'),
@@ -2937,6 +3985,7 @@ async function boot(): Promise<void> {
   unitsAtlas = unitsData;
   housesAtlas = housesData;
   treesAtlas = treesData;
+  guiAtlas = guiData;
 
   specs = parseUnitDat(unitdatBuf);
   serfCarry = parseSerfCarry(unitdatBuf);
@@ -2947,6 +3996,8 @@ async function boot(): Promise<void> {
   supplyIn = supply.in;
   supplyOut = supply.out;
   houseFireAnims = parseHouseFireAnims(housesBuf);
+  buildSupply = parseBuildSupply(housesBuf);
+  buildableTypes = HOUSE_TYPE_NAMES.map((_, i) => i).filter((i) => i !== HT_NONE && houseSpecs[i] !== undefined);
   tileFlags = parseTilesJson(tilesText);
   mapList = mapsJson
     .slice()
@@ -2958,6 +4009,7 @@ async function boot(): Promise<void> {
   houseTex = await Promise.all(housesData.sheets.map((s) => loadTexture(`/out/atlas/${s.file}`)));
   houseMaskTex = await Promise.all((housesData.maskSheets ?? []).map((s) => loadTexture(`/out/atlas/${s.file}`)));
   treeTex = await Promise.all(treesData.sheets.map((s) => loadTexture(`/out/atlas/${s.file}`)));
+  guiTex = await Promise.all(guiData.sheets.map((s) => loadTexture(`/out/atlas/${s.file}`)));
 
   unitByI = new Map();
   for (const sp of unitsData.sprites) unitByI.set(sp.i, sp);
@@ -2967,6 +4019,8 @@ async function boot(): Promise<void> {
   for (const sp of treesData.sprites) treeByI.set(sp.i, sp);
   tilesByI = new Map();
   for (const sp of tilesetData.sprites) tilesByI.set(sp.i, sp);
+  guiByI = new Map();
+  for (const sp of guiData.sprites) guiByI.set(sp.i, sp);
 
   buildQuad();
   ringTex = buildRingTexture();
