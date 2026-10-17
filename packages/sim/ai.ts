@@ -4959,7 +4959,7 @@ export class CityManagement {
       // CheckAutoRepair: no repair mode in v0 (flagged).
       // CheckWareDistribution: no WareDistribution in v0 (flagged).
       this.weaponsBalance();
-      // OrderWeapons: no house WareOrder in v0 (worker N).
+      this.orderWeapons();
       // CheckExhaustedHouses: mines do not deplete in v0 (flagged).
     }
   }
@@ -5185,6 +5185,38 @@ export class CityManagement {
     }
     void weaponFraction;
     void armorFraction;
+  }
+
+  /**
+   * CheckWeaponOrderCount (KM_AIMayor.pas 278–329): a workshop without an order left gets the orders of its
+   * products, in portions of 8. v0 simplification: the Pascal WarfareRatios (KM_AIMayorBalance) are replaced
+   * by each product's deficit (required − available, floored at 0), normalised over the house's outputs.
+   */
+  orderWeapons(): void {
+    const PORTIONS = 8;
+    const stats = this.world;
+    for (const h of stats.houses) {
+      if (h.owner !== this.owner || h.destroyed || h.buildState !== 'done') continue;
+      if (h.typeId !== HT_WEAPON_WORKSHOP && h.typeId !== HT_ARMOR_WORKSHOP) continue;
+      const spec = stats.houseSpecOf(h.typeId);
+      if (spec === undefined) continue;
+      let ordered = 0;
+      for (let r = 1; r <= 4; r++) ordered += stats.wareOrderOf(h.uid, r);
+      if (ordered !== 0) continue;
+      const deficit: number[] = [];
+      let sum = 0;
+      for (let r = 1; r <= 4; r++) {
+        const ware = spec.resOut[r - 1];
+        const demand = ware >= WARE_WARFARE_MIN && ware - WARE_WARFARE_MIN < this.requiredWeapons.length
+          ? this.requiredWeapons[ware - WARE_WARFARE_MIN]
+          : undefined;
+        const d = demand !== undefined ? Math.max(demand.required - demand.available, 0) : 0;
+        deficit.push(d);
+        sum += d;
+      }
+      if (sum <= 0) continue;
+      for (let r = 1; r <= 4; r++) stats.setWareOrder(h.uid, r, Math.round((deficit[r - 1] / sum) * PORTIONS));
+    }
   }
 }
 

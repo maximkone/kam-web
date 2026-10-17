@@ -220,6 +220,11 @@ function grantBarracks(world: EconomyWorld, hand: number): EconHouse {
         if (!world.canPlaceHouse(HT_BARRACKS, x + spec.entranceDx, y)) continue;
         const house = world.spawnHouse(HT_BARRACKS, x, y, hand);
         world.houseCreatedFor(hand, HT_BARRACKS);
+        // A map's barracks stands on the village's roads: its warfare wares come by serfs (M5e), so the grant
+        // lays the road to the store (the route between the two doors, as the road builder would).
+        const route = world.findRoute(house.entrance.x, house.entrance.y + 1, store.entrance.x, store.entrance.y + 1);
+        if (route === null) throw new Error(`attack scenario: no walk route from the barracks at (${x},${y}) to the store`);
+        for (const p of route) if (!world.isRoadTile(p.x, p.y)) world.addRoadTile(p.x, p.y);
         return house;
       }
     }

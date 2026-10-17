@@ -29,7 +29,7 @@ export const EXPECTED: { load: unknown; events: unknown; final: unknown; sha256:
     'school-unit-created': 9,
     'school-unit-trained': 8,
     'unit-killed': 11,
-    'ware-delivered': 59,
+    'ware-delivered': 60,
     'worker-assigned': 1,
   },
   final: {
@@ -46,5 +46,5 @@ export const EXPECTED: { load: unknown; events: unknown; final: unknown; sha256:
     matchOver: false,
     houseDamage: 0,
   },
-  sha256: '54a2cdfc08561e692aeed4cf3cc6ef2e3c805b0fa39be095c169305691c2ed91',
+  sha256: '925cc8077efde947db92c7ed37016b89e260c0d740e0c96cf42d3004434b2951',
 };

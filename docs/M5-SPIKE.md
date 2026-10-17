@@ -390,3 +390,146 @@ quarry cuts stone into the store), which unblocks the sawmill reservation; (2) a
 so `warfare > 0` and the predictor asks for the barracks; (3) armour/shield production, the school's recruits
 and barracks equip; (4) mines plus a smithy for the metal weapons. Each step is an M3-style production model in
 `economy.ts`; the chain table above is the test for each.
+
+### 7.7 Worker Q3 - the organic army: the store and bid fixes; the chain now stops at the stone crisis (not raised)
+
+Goal (as 7.6): the Advanced AI raises its own army in the organic run, no scenario grants. **Result: not reached.**
+The chain now gets past the first two links with real stone and a sawmill, but the barracks is still never wanted.
+Q2's production (quarry, sawmill, workshops, barracks pipeline) was verified first; the two breakages are fixed.
+Also fixed: the economy had no store demand and no bid importance (both Pascal rules), which the organic chain needed.
+
+**Commands and one-line results (run on the final state):**
+- `node tools/prodsim/cli.ts --check` -> `PROD CHECK PASS (6000 ticks, stone in store 30 >= 20, weapons 12 >= 10, soldiers 5 >= 5, two runs identical)`, sha `f20ca3ae...` (unchanged).
+- `node tools/aisim/cli.ts --check` run 1 and run 2 -> `AI CHECK PASS (economy 30000 ticks, 1596 events; attack 12000 ticks; organic 60000 ticks)`, identical. Economy sha `18e3bcff6f6547cfa82de45b934f338d8f7ff09fbf7bc517dd5f2a525f5c94cf`; attack sha `4f3145e82388821523cdee2a852a4b2a19c8140ca0e5eb7aa3bf8cc6d1c9269d`; organic sha `d8f986f5488938f29435bc2c473de83de47e881a29a7a25668b9d435b176e58a`.
+- `node tools/skirmish/cli.ts --check` -> `SKIRMISH CHECK PASS (3000 ticks, 385 events, 8 commands, 1933 ms)`, sha `925cc8077efde947db92c7ed37016b89e260c0d740e0c96cf42d3004434b2951` (was `54a2cdfc...`; re-frozen, see below).
+- `npm test` -> `tests 156, pass 154, fail 2`: `packages/net/lockstep.test.ts` (R's, not touched) and `packages/sim/economy.test.ts:203` "carpenter saw cycle" (store-driven, see decision 2).
+- `npx tsc --noEmit` -> no error in `packages/sim`, `tools/prodsim`, `tools/aisim`, `tools/skirmish`, `packages/assets`; the remaining errors are in `apps/server`, `packages/net` and `tools/nettest` only (R's, not touched).
+- `node tools/walksim/cli.ts --check` -> `WALK CHECK PASS`; `node tools/combatsim/cli.ts --check` -> `COMBAT CHECK PASS`, sha `09a19821...` (unchanged); `node tools/mapscan/cli.ts --check` -> `MAPSCAN CHECK PASS (243 maps, 0 anomalies)`.
+- **Moved, not re-frozen (decision 2):** `node tools/econsim/cli.ts --check` FAIL, sha `3758caa3...` (was `6d780b62...`); `node tools/buildsim/cli.ts --check` FAIL, sha `895b56e1...` (was `98b80525...`).
+
+**Organic chain (60000 ticks, hand 1, Battle Sun, no military grants; `node tools/aisim/cli.ts --check`):**
+
+| link | reached | first tick | value |
+|---|---|---|---|
+| quarry produces stone (`stone-out`) | yes | 2923 | 48 stone events |
+| sawmill placed (`house-wip type=0`) | yes | 5745 | 1 |
+| barracks wanted (predictor `requiredHouses[21] > 0`) | no | - | 0 |
+| barracks placed (`house-wip type=21`) | no | - | 0 |
+| barracks built (`house-activated type=21`) | no | - | 0 |
+| recruits trained (`school-unit-trained type=13`) | no | - | 0 |
+| weapons/armour produced (`ware-produced`) | no | - | 0 |
+| warfare wares in stock at the end | no | - | 0 |
+| soldiers equipped (`barracks-equipped`) | no | - | 0 |
+| army groups formed | no | - | 0 |
+
+**Fixes (each one traced to the Pascal):**
+1. `tools/prodsim/expected.ts`: `EXPECTED_SHA: string` (tsc TS2367: a literal type compared with `''`). Not a rule.
+2. `packages/sim/commands.test.ts` (one line): the house-equip test put the axes in the hand's store. `CanEquip` reads the barracks' own warfare stock, `fResourceCount` (`KM_HouseBarracks.pas 331-341`), which Q2's `barracksCanEquip` uses (the committed version read the hand's out-wares). The test now stocks the barracks.
+3. **The store takes wares (the root of the stall).** `packages/sim/economy.ts` `addStoreDemands` (new), called from `buildDemands` and `addDemandsOnActivate`: an always-on demand per ware, `dtAlways`, no cap (`KM_Houses.pas 657-660` wtAll expansion; `KM_HandLogistics.pas 1372`, `1863-1870`). Before this, quarry stone and sawmill timber had no destination: the stone stock fell to 12 and stayed there, `stoneCrisis` (`KM_CityBuilder.pas 867-870`, port `ai.ts 4353`) stayed on, and while it was on only quarries, schools and inns could be placed (`KM_CityBuilder.pas 1167`, port `ai.ts 4576`), so no weapon workshop, no barracks. The M3 `applyDemoScenario` comment (`economy.ts`, "the store never demands on its own") described this as a simplification; it is no longer true.
+4. Warfare goes to a store only when the hand has no barracks: `storeAccepts` (`KM_HandLogistics.pas 1243-1250`).
+5. House>Store bid penalty: `STORE_BID_PENALTY = 1000` on a store demand (`KM_HandLogistics.pas 1583-1590`, `IncAddition(1000)` for `wtAll`).
+6. **Bid importance** (`KM_HandLogistics.pas 30-35`, `551-577`): `DI_*` constants, `houseDemandImportance` (gold to a school `diHigh1`, food to an inn `diHigh3`, `1160-1171`); construction materials and the road builder's stone and timber are `diHigh4` (`addConstructionDemand`, `addUnitDemand`; `KM_UnitTaskBuild.pas 241, 388, 637-638`). Offers are served in order of their best open demand's importance (stable: offer order among equals); within an offer the most important demand wins, then the nearest.
+
+**Movements and their causes (decision 2 for the lead):**
+- Economy numbers (aisim economy and M3 econsim/buildsim): the store now takes wares, so trunks and boards reach the store (`storeTimber` up, `sawmillTimber` down in econsim).
+- Skirmish: `ware-delivered` 59 -> 60 (one more ware reaches the store); the `final` block is unchanged; re-frozen in `tools/skirmish/expected.ts`.
+- Attack phase (re-frozen): equipped 12 (unchanged), warriors at the end 63 -> 54, kills by hand 9 -> 8, kills by enemies 3 -> 12, losses 3 -> 12, enemy warriors at the end 12 -> 13. The combat code is unchanged; the economy feeds different soldiers and wares into the same scenario. Not analysed further.
+- The organic numbers (re-frozen with the chain table above).
+
+**The next blocker (diagnosed, not fixed):** stone. After fix 3 the stone production works for about 24 stones, then quarries stop. The Eye's stone list (`KM_Eye.pas 933-972`, port `ai.ts 1728`) has 25 locations 16-37 tiles from the store. The five built quarries sit 15-37 tiles from them. Minable stone tiles (a walkable tile below the deposit, reachable inside the stonemason's cost-limited walk, `KM_Terrain.pas 2584-2608`, port `economy.ts 2836`) are reachable from **none** of the five quarries (`Q3QREACH`, `Q3QDIAG` in the scratch probe). The stonemason logic matches the Pascal line by line; the planner's `FindPlaceForQuary` (`KM_CityPlanner.pas 2151-2232`, port `ai.ts 3643`) also matches; the drift is in where the quarries are placed (the build-field distance / `FindPlaceForHouse` inputs, `KM_CityPlanner`). Next step for the next worker: compare `BuildFF` distance, `getDistanceInitPoint` and `findPlaceForHouse` (`KM_TerrainFinder` / `KM_AIFields`) against the Pascal on this map.
+With stone at 1, the stone crisis holds, nothing except quarries can be placed (fix 3), so the weapon workshop (requested from tick 2000: `WEAP_WORKSHOP_DELAY` is off because `peacetimeMinutes = 0`, `KM_CityPredictor.pas 713, 773`) is never placed, warfare stays 0, and the barracks is never wanted (`KM_CityPredictor.pas 468`). In an earlier run (before fix 5) two workshops were built and five axes produced, and the barracks was placed as a site at tick ~18000, then starved for timber; fix 5 (Pascal-correct) changed that outcome, so the earlier result came from the unfaithful store take-all, not from the chain. Serfs are not the blocker (24 serfs, all idle with no task at the end).
+
+**Not reached, so not claimed:** barracks built, recruits at the school (the gold-to-school `diHigh1` rule is in; no recruit was trained for the army), equip, groups.
+
+**Simplifications (7.7):**
+- Bids: no random element (`KaMRandom(10)`, `KM_HandLogistics.pas ~1580`), no "fewer supply" bid (`+20 x CheckWareIn`, `~1585`). Offer order by importance is an approximation of the Pascal's bid over (offer, demand) pairs.
+- A barracks warfare demand is capped at one concurrent delivery (`1 - being`), a v0 approximation kept from 7.5; a store demand is uncapped (`dtAlways`).
+- `FindPlaceForQuary` and the stonemason use the port's walk (`tilesWithinDistance`, `routeCanBeMade`), not the Pascal's full `TKMTerrain` routes; the quarry geometry above is the first thing to check.
+- `StoneRemaining` is a per-tile shadow (7.6): a depleted tile stops giving stone; the map terrain is not changed.
+
+**Decisions for the lead:**
+1. Keep the store take-all and the bid rules (faithful, the organic chain's first real fix) or revert them to keep the M3 numbers. Reverting puts the organic chain back to the 7.6 stall (stone stuck at 12).
+2. Re-freeze or accept the moved M3 numbers: `econsim` (`3758caa3...`), `buildsim` (`895b56e1...`), and `economy.test.ts:203` (the saw cycle's third delta is now 1511 ticks: the sawmill waits for a trunk once the store takes them; not traced). Left as they are, so the checks show it.
+3. Performance: the economy run takes 20-26 s (was ~18 s; 120 s once when run in parallel with `tsc`).
+
+### 7.8 Worker Q4 - the saw-cycle stall: the bid rule and a foreign-worker bug; the movement re-frozen
+
+**Root cause of the 1511-tick stall (not the store rules).** Demo probe (`economy.test.ts` setup, scratch log): the
+sawmill's timber output piles up (`timber-out` 2, 4, 6 at ticks 439, 800, 1161) while the one serf keeps carrying
+trunks (store to sawmill, hut to store). The timber offer sat behind them until tick 1977. Cause: `logistics()` walked
+the offers in order of their best importance, and took the **first** offer that had a valid demand, then its best demand.
+At equal importance (all `diNorm`), the store's trunk offers always came first, so the sawmill's timber (offered later)
+waited. Pascal does not do that: `TKMDeliveries.UpdateState`'s loop bids over **all** (offer, demand) pairs, keeps the
+highest importance, then the lowest cost (`KM_HandLogistics.pas 551–577`, `CompareBids` 2356–2367). The cost of
+`TryCalculateBidBasic` (1492–1591) adds `+1000` when the demand is `wtAll` (a store) **and** when the offer house is a
+store and the ware is not warfare (1587–1590). The TS had the first half only. With the global bid the timber
+(sawmill to store, +1000) and the trunks (store to sawmill, +1000) compete on road cost, as in Pascal.
+
+**Changes (packages/sim/economy.ts):**
+1. `logistics()` rewritten as one global bid over all valid (offer, demand) pairs: most important demand first, then the
+   lowest cost; a tie keeps the first pair found (deterministic). `KM_HandLogistics.pas 551–577, 2356–2367`. A candidate
+   needs an idle serf that can walk to the offer house (`AnySerfCanDoDelivery`). The assignment code is unchanged.
+2. Store-offer penalty: `+STORE_BID_PENALTY` when the offer house is a store and the ware is not warfare
+   (`KM_HandLogistics.pas 1587–1590`). Not separately ablated (it is only meaningful inside the global bid).
+3. A unit demand's cost is its walk-route step count (`findPath`, the tpWalk route, 1223–1226) instead of the euclidean
+   distance. Not shown necessary: with the euclidean cost the aisim numbers also move (other shas). Kept because it is the
+   closer approximation; the lead may revert it (`git` diff of the `d.unitUid !== 0` branch) if a smaller change is wanted.
+4. `findEmptyHouse` only offers houses of the unit's own hand: `if (h.owner !== u.owner) continue;`
+   (`KM_Units.pas 467`: `gHands[Owner].Houses.FindEmptyHouse`). Found while probing Battle Sun: the AI's woodcutter (owner 1)
+   worked in the human's woodcutter (home 27, owner 0), and the AI's carpenter (owner 1) in the human's sawmill (home 26,
+   owner 0) (`NOGRANT=1` probe, `WU` lines: before the fix; after it, no cross-owner home).
+
+The six Q3 rules stay (none is shown to be wrong). The `applyDemoScenario` stall was not a store problem: the store
+rules only made the store take the wares that then competed.
+
+**Evidence, demo test (`economy.test.ts`, unchanged):** `timber-out` every 361 ticks; the last three deltas `361,361,361`
+(the test passes, 8/8). Probe log: sawmill outputs at 439, 800, 1161, 1522, 1883, 2244, 2605, 2966 (all 361), timber
+delivered 14 times (was: stalled after 1161).
+
+**Evidence, realistic (MapsMP/Battle Sun, hand 0, woodcutter + sawmill by `housePlan` commands with BFS roads, granted
+woodcutter and carpenter workers at the store; scratch probe, not in the repo):**
+- Current tree: sawmill outputs 1602, 1963, 2324, 2685, 3046, 3707, 4068, 4479, 6390; deltas `361,361,361,361,661,361,411,1911`.
+  Every output is 310 ticks after a `trunk-taken`, and every gap equals the gap in trunk intake (2736 to 3397 = 661,
+  3758 to 4169 = 411, 4169 to 6080 = 1911). The sawmill never waits with a trunk in hand: the gaps are the woodcutter's idle
+  periods (no `chop-plan` between 4011 and 5169).
+- Committed M3 (`git show HEAD:packages/sim/economy.ts`): 3 outputs (1602, 1963, 2324) and then none in 9000 ticks; store
+  timber flat at 43. The Q3 state was not run with these grants (without grants it gave 7977, 8338, 8699, with the
+  owner bug in play), so the claim against Q3 rests on the demo and the econsim numbers above.
+- Without workers (`NOGRANT=1`, before the owner fix) the human's sawmill was staffed by an AI carpenter; after the fix it
+  stays empty until a human carpenter exists (the Pascal rule; training needs gold and a school, see the probe notes).
+
+**Movements, decomposed (each re-frozen; the Q3 numbers reproduce exactly on a scratch copy of the Q3 economy):**
+- `econsim` (`3758caa3...` -> `bde47e76...`): every count equals Q3 except `rngState`, and `hutTrunks` 5 -> 0,
+  `sawmillTimber` 6 -> 0, `storeTimber` 30 -> 38. Those are the store taking wares, as Q3 said; the hut and the sawmill no
+  longer stop with full output. `deliveries` 143 -> 160 and trees felled 5 -> 7 (the hut no longer blocks).
+- `buildsim` (`895b56e1...` -> `6d9d96ed...`): the Q3 movement was deliveries 119 -> 127 (the store). The bid order makes
+  it 126 deliveries and 8 house assignments (Q3 9); the hut completes at tick 1137 (`house-activated`), against 1098 in Q3
+  and 1284 in the committed M3 economy. Still faster than the base a human plays.
+- `skirmish` unchanged (`925cc807...`, 67 deliveries, 60 `ware-delivered`): no re-freeze needed.
+- `aisim` (all three phases re-frozen; the owner fix changes nothing there, checked on a scratch copy):
+  economy `18e3bcff...` -> `fae374de...` (1478 events; houses completed 8 -> 7); attack `4f3145e8...` -> `72bf668e...`
+  (kills by hand 8 -> 9, by enemy 12 -> 7); organic `d8f986f5...` -> `f36f6bb4...` (quarry 2923 unchanged, sawmill placed
+  5745 -> 5573, barracks still never wanted).
+- **Open, for the lead:** in the aisim economy window the AI no longer builds its farm and corn fields (`field-built`
+  14 -> 0, `cornFields` 14 -> 0) nor its inn (`house27` built 1 -> 0). Cause: the bid order now gives road builders' stone
+  (diHigh4, unit demand) and construction stone (diHigh4) to the cheapest demand, so stone (quarry output unchanged, 24)
+  goes elsewhere. This is what Pascal's rule implies, but it is a worse AI food build-out than Q3 in this window. Not fixed.
+  Choosing: keep (faithful, fixes the stall) or find the unit-demand priority difference first.
+
+**Acceptance (run on the final state):**
+- `node --test packages/sim/economy.test.ts` -> `tests 8, pass 8, fail 0` (361,361,361 asserted; expectations untouched).
+- `node tools/econsim/cli.ts --check` -> `ECON CHECK PASS (6000 ticks, 379 events)`, sha `bde47e76...` (re-frozen).
+- `node tools/buildsim/cli.ts --check` -> `BUILD CHECK PASS (2000 ticks, 295 events)`, sha `6d9d96ed...` (re-frozen).
+- `node tools/prodsim/cli.ts --check` -> `PROD CHECK PASS (6000 ticks, ... two runs identical)`, sha `f20ca3ae...` (unchanged).
+- `node tools/aisim/cli.ts --check` -> `AI CHECK PASS (economy 30000 ticks, 1478 events; attack 12000 ticks; organic 60000 ticks)`,
+  twice, identical (economy `fae374de...`, attack `72bf668e...`, organic `f36f6bb4...`) (re-frozen).
+- `node tools/skirmish/cli.ts --check` -> `SKIRMISH CHECK PASS (3000 ticks, 385 events, 8 commands)`, sha `925cc807...` (unchanged).
+- `node tools/combatsim/cli.ts --check` -> `COMBAT CHECK PASS`, sha `09a19821...` (unchanged).
+- `node tools/walksim/cli.ts --check` -> `WALK CHECK PASS`; `node tools/mapscan/cli.ts --check` -> `MAPSCAN CHECK PASS (243 maps, 0 anomalies)`.
+- `npm test` -> `tests 163, pass 162, fail 1` (the failure is `packages/net/lockstep.test.ts`, worker R's, not touched).
+- `npx tsc --noEmit` -> no error in `packages/sim`, `tools/econsim`, `tools/buildsim`, `tools/prodsim`, `tools/aisim`,
+  `tools/skirmish`; the errors left are `apps/server`, `packages/net`, `tools/nettest` (R's) and `tools/host/pack.ts(92,15)`
+  (not mine, not in the brief's list: a call with one argument where two or three are expected; left for its owner).
+
+**Not done:** the store always-on demand is not reverted (no flag added; the stall had another cause). The realistic probe
+is in scratch only (`C:\Users\me\AppData\Local\Temp\opencode\q4\battle-sun-saw.ts`), not a repo tool.

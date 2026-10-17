@@ -76,6 +76,8 @@ import {
 } from './ai.ts';
 import type { AiSetup } from './ai.ts';
 import { ArmyManagement } from './aiarmy.ts';
+import { applyRichStart, isAiStartLevel, AI_START_LEVELS } from './aistart.ts';
+import type { AiStartLevel } from './aistart.ts';
 import { AiSupervisor } from './aisupervisor.ts';
 import { applyCommand } from './commands.ts';
 import type { Command, CommandLog, CommandResult } from './commands.ts';
@@ -88,6 +90,8 @@ export interface SkirmishSlot {
   hand: number;
   kind: SlotKind;
   aiLevel?: AiLevel;
+  /** The AI's rich start (aistart.ts): 'none' (default) gives the AI no army; an AI slot only. */
+  aiStart?: AiStartLevel;
   team?: number;
   color?: number;
 }
@@ -107,6 +111,9 @@ export interface CreateSkirmishOptions {
   defines: SkirmishDefines;
   seed: number;
   slots: SkirmishSlot[];
+  /** The Remake's lobby "Peacetime" game option in minutes (KM_Game.pas IsPeaceTime, gGame.Options.Peacetime): the AI neither
+   *  attacks nor defends before it ends, and its build order delays towers/recruits/barracks by it. 0 (default) = none. */
+  peaceMinutes?: number;
 }
 
 /** A goal of one hand: `hand` is the goal's target hand (HandIndex, KM_AIGoals.pas). */
@@ -131,6 +138,7 @@ export interface NormalizedSlot {
   hand: number;
   kind: SlotKind;
   aiLevel: AiLevel;
+  aiStart: AiStartLevel;
   team: number;
   color: number;
 }
@@ -303,12 +311,15 @@ export function normalizeSlots(slots: SkirmishSlot[], handCount: number): Normal
     if (s.kind !== 'human' && s.kind !== 'ai') throw new Error(`skirmish: slot kind must be human or ai, got ${String(s.kind)}`);
     const aiLevel = s.aiLevel ?? 'advanced';
     if (aiLevel !== 'advanced') throw new Error('skirmish: the classic AI is not ported in v0; use advanced');
+    const aiStart = s.aiStart ?? 'none';
+    if (!isAiStartLevel(aiStart)) throw new Error(`skirmish: aiStart must be one of ${AI_START_LEVELS.join(', ')}, got ${String(aiStart)}`);
+    if (aiStart !== 'none' && s.kind !== 'ai') throw new Error(`skirmish: hand ${s.hand} is human; only an AI slot can take an aiStart`);
     const team = s.team ?? s.hand;
     if (teams.has(team)) {
       throw new Error(`skirmish: hands ${teams.get(team)} and ${s.hand} share team ${team}; v0 alliances are per hand`);
     }
     teams.set(team, s.hand);
-    out.push({ hand: s.hand, kind: s.kind, aiLevel, team, color: s.color ?? s.hand });
+    out.push({ hand: s.hand, kind: s.kind, aiLevel, aiStart, team, color: s.color ?? s.hand });
   }
   if (!out.some((s) => s.kind === 'human')) throw new Error('skirmish: at least one human slot is needed');
   return out.sort((a, b) => a.hand - b.hand);
@@ -362,6 +373,8 @@ function keepOpenContent(mission: Mission, open: Set<number>): Mission {
 export function createSkirmish(opts: CreateSkirmishOptions): Skirmish {
   if (!Number.isInteger(opts.seed) || opts.seed < 0) throw new Error('skirmish: seed must be a non-negative integer');
   const mapPath = opts.mapPath ?? 'skirmish.map';
+  const peaceMinutes = opts.peaceMinutes ?? 0;
+  if (!Number.isFinite(peaceMinutes) || peaceMinutes < 0 || peaceMinutes > 240) throw new Error('skirmish: peaceMinutes must be 0..240');
   const map: KaMap = parseMapFileBytes(opts.mapBytes, mapPath).map;
   const tiles = parseTilesJson(opts.defines.tilesJson);
   const elems = parseMapElem(opts.defines.mapElem);
@@ -420,12 +433,17 @@ export function createSkirmish(opts: CreateSkirmishOptions): Skirmish {
     }
   }
 
+  for (const s of slots) {
+    if (s.aiStart !== 'none') applyRichStart(world, s.hand, { level: s.aiStart });
+  }
+
   const aiList: AiPlayer[] = [];
   for (const s of slots) {
     if (s.kind !== 'ai') continue;
     const setup: AiSetup = { ...setups[s.hand], hand: s.hand, newAI: true };
     const ai = new AiPlayer(world, influences, eye, setup);
     ai.attachArmy(new ArmyManagement(world, ai));
+    ai.predictor.peacetimeMinutes = peaceMinutes;
     ais[s.hand] = ai;
     aiList.push(ai);
   }

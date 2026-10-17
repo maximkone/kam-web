@@ -2,3 +2,6 @@ _ref/
 node_modules/
 out/
 *.log
+
+# FPC / wasm port work area (toolchains, builds, copies of the reference source): never committed
+_fpc/

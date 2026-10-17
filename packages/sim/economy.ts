@@ -85,6 +85,9 @@ import {
   WT_TIMBER,
   WT_STONE,
   WT_GOLD,
+  WT_COAL,
+  WT_IRON,
+  WT_LEATHER,
   WT_AXE,
   WT_WOODEN_SHIELD,
   WT_LEATHER_ARMOR,
@@ -96,6 +99,10 @@ import {
   WT_LANCE,
   WT_PIKE,
   WT_HORSE,
+  WT_WINE,
+  WT_BREAD,
+  WT_SAUSAGE,
+  WT_FISH,
 } from '../assets/wares.ts';
 // M5a construction slice (docs/M5-SPIKE.md §1a/§2; construction.ts holds the plan stores).
 import type {
@@ -250,7 +257,7 @@ export interface EconUnit {
   carry: number; // ware id, -1 = none
   inside: boolean;
   homeUid: number; // 0 = none
-  taskKind: 'none' | 'goHome' | 'chop' | 'saw' | 'deliver' | 'idle' | 'buildHouseArea' | 'buildHouse' | 'buildRoad' | 'buildField' | 'selfTrain';
+  taskKind: 'none' | 'goHome' | 'chop' | 'saw' | 'deliver' | 'idle' | 'buildHouseArea' | 'buildHouse' | 'buildRoad' | 'buildField' | 'selfTrain' | 'stone' | 'smith' | 'workshop';
   // M4 (additive): unit combat (docs/M4-SPIKE.md §3)
   hitPoints: number;
   groupUid: number; // 0 = none
@@ -283,10 +290,20 @@ interface ChopPlan {
   dir: number; // direction from the spot toward the tree (KMGetVertexDir)
 }
 
+/** M5c (additive): a stonemason work plan — the walkable tile below the stone deposit. */
+interface StonePlan {
+  loc: Pt; // the walkable tile below the stone deposit (KMGetVertexDir = dirN)
+}
+
 type Task =
   | { kind: 'goHome'; phase: number }
   | { kind: 'chop'; phase: number; plan: ChopPlan | null; distant: boolean }
+  | { kind: 'stone'; phase: number; plan: StonePlan | null; distant: boolean }
   | { kind: 'saw'; phase: number; phase2: number }
+  | { kind: 'smith'; phase: number; phase2: number }
+  // M5e (additive, docs/M5-SPIKE.md 7.7): TKMTaskMining for a workshop (KM_UnitWorkPlan.pas 376–421):
+  // the product (WareOutput), its input wares (ResourcePlan) and the house work steps (SubActAdd).
+  | { kind: 'workshop'; phase: number; phase2: number; product: number; costs: number[]; steps: number[]; stepIdx: number }
   | { kind: 'deliver'; phase: number; fromUid: number; toUid: number; toUnitUid: number; ware: number; demand: Demand; taken: boolean; deliverKind: 'house' | 'construction' | 'unit' }
   // M5a builder tasks (docs/M5-SPIKE.md §2.2): TKMTaskBuildHouseArea (:681–765),
   // TKMTaskBuildHouse (:845–901), TKMTaskBuildRoad (:218–291), TKMTaskBuildField (:503–543).
@@ -351,6 +368,21 @@ interface Demand {
   // M5a (additive): a construction demand (AddDemand(fHouse, nil, wtTimber, WoodCost, dtOnce, diHigh4),
   // KM_UnitTaskBuild.pas 637–638) — count-based like a script demand, delivered with WareAddToBuild.
   construction: boolean;
+  /** TKMDemandImportance as an index (0 diNorm, 1 diHigh4, 2 diHigh3, 4 diHigh1; KM_HandLogistics.pas 30–35). */
+  importance?: number;
+}
+
+/** TKMDemandImportance (KM_HandLogistics.pas 30–35), the enum order: the higher wins a bid first. */
+const DI_NORM = 0;
+const DI_HIGH4 = 1;
+const DI_HIGH3 = 2;
+const DI_HIGH1 = 4;
+
+/** AddDemand's importance override (KM_HandLogistics.pas 1160–1171): gold to a school is diHigh1, food to an inn diHigh3. */
+function houseDemandImportance(typeId: number, ware: number): number {
+  if (ware === WT_GOLD && typeId === HOUSE_TYPE_SCHOOL) return DI_HIGH1;
+  if ((ware === WT_BREAD || ware === WT_SAUSAGE || ware === WT_WINE || ware === WT_FISH) && typeId === HOUSE_TYPE_INN) return DI_HIGH3;
+  return DI_NORM;
 }
 
 interface Offer {
@@ -372,6 +404,10 @@ interface HouseState {
   unitWipUid?: number;
   hideOneGold?: boolean;
   trainProgress?: number;
+  // M5e (additive): a workshop's production orders (KM_Houses.pas 136 fWareOrder[1..4], PickOrder
+  // 1575–1649) and fLastOrderProduced (1-based, 0 = none). Set by setWareOrder (the AI's OrderWeapons).
+  wareOrder?: number[];
+  lastOrderProduced?: number;
 }
 
 interface UnitState {
@@ -397,9 +433,26 @@ function pointBelowEntrance(h: EconHouse): Pt {
 const HOUSE_TYPE_SCHOOL = 13;
 /** The script id of htBarracks (ai.ts HT_BARRACKS) and the utRecruit unit record (ai.ts UT_RECRUIT). */
 const HOUSE_TYPE_BARRACKS = 21;
+const HOUSE_TYPE_STORE = 11;
+const HOUSE_TYPE_INN = 27;
+/** A store's wtAll demand has no count cap (dtAlways, KM_HandLogistics.pas 1372): any number of deliveries. */
+const STORE_NO_CAP = 1 << 30;
+/** The House>Store bid penalty (KM_HandLogistics.pas 1583–1590: IncAddition(1000) for a wtAll demand). */
+const STORE_BID_PENALTY = 1000;
 const UNIT_RECRUIT = 13;
 /** TROOPS_TRAINED_CONDITION (KM_Defaults.pas 376): a barracks warrior starts at 0.6 of max condition. */
 const TROOPS_TRAINED_CONDITION = 0.6;
+/** M5e (additive, docs/M5-SPIKE.md 7.7): the production houses and workers (ai.ts HT_* / UT_*). */
+const HOUSE_TYPE_QUARRY = 14;
+const HOUSE_TYPE_WEAPON_WORKSHOP = 19;
+const HOUSE_TYPE_ARMOR_WORKSHOP = 20;
+const UNIT_CARPENTER = 5;
+const UNIT_STONEMASON = 10;
+/** WARFARE_MIN..WARFARE_MAX (wtWoodenShield..wtHorse): the barracks' input range (KM_HouseBarracks.pas 16). */
+const WARFARE_MIN = 16;
+const WARFARE_MAX = 26;
+/** MAX_WARES_ORDER (KM_Defaults.pas 301): the cap of one WareOrder entry of a production house. */
+const MAX_WARES_ORDER = 999;
 
 /**
  * TROOP_COST (KM_ResUnits.pas 168–177): the wares one warrior costs at a barracks, keyed by the
@@ -418,14 +471,33 @@ export const TROOP_COST: Record<number, number[]> = {
 };
 
 /**
+ * WARFARE_COSTS (KM_ResWares.pas 72–83): the two input wares of one workshop product (-1 = none).
+ * The workshop's PickOrder and its ResourcePlan read it (KM_Houses.pas 1590–1595).
+ */
+const WARFARE_COSTS: Record<number, [number, number]> = {
+  [WT_WOODEN_SHIELD]: [-1, WT_TIMBER],
+  [WT_IRON_SHIELD]: [WT_COAL, WT_IRON],
+  [WT_LEATHER_ARMOR]: [-1, WT_LEATHER],
+  [WT_IRON_ARMOR]: [WT_COAL, WT_IRON],
+  [WT_AXE]: [WT_TIMBER, WT_TIMBER],
+  [WT_SWORD]: [WT_COAL, WT_IRON],
+  [WT_LANCE]: [WT_TIMBER, WT_TIMBER],
+  [WT_PIKE]: [WT_COAL, WT_IRON],
+  [WT_BOW]: [WT_TIMBER, WT_TIMBER],
+  [WT_CROSSBOW]: [WT_COAL, WT_IRON],
+};
+
+/**
  * The per-house runtime state. M5b: a school (script id 13) gets the queue of
  * TKMHouseSchool (fQueue 6 slots, -1 = utNone) + fUnitWip/fHideOneGold/fTrainProgress.
  */
 function createHouseState(typeId: number, spec: HouseSpec | undefined): HouseState {
   const isStore = typeId === 11; // htStore script id
+  // M5e: a barracks keeps its own warfare stock (fResourceCount, KM_HouseBarracks.pas 16, 184–198).
+  const hasStock = isStore || typeId === HOUSE_TYPE_BARRACKS;
   const state: HouseState = {
     spec,
-    stock: isStore ? new Int32Array(WARE_CNT) : null,
+    stock: hasStock ? new Int32Array(WARE_CNT) : null,
     workerUid: 0,
     being: [0, 0, 0, 0],
     isStore,
@@ -435,6 +507,10 @@ function createHouseState(typeId: number, spec: HouseSpec | undefined): HouseSta
     state.unitWipUid = 0;
     state.hideOneGold = false;
     state.trainProgress = 0;
+  }
+  if (typeId === HOUSE_TYPE_WEAPON_WORKSHOP || typeId === HOUSE_TYPE_ARMOR_WORKSHOP) {
+    state.wareOrder = [0, 0, 0, 0];
+    state.lastOrderProduced = 0;
   }
   return state;
 }
@@ -514,6 +590,11 @@ export class EconomyWorld {
   private readonly tileLock: Uint8Array; // TKMTileLock per tile (TL_*)
   private readonly workerGrid: PassGrid; // tpWorker (KM_Terrain.pas 3840–3844)
   private readonly treeAge: Uint8Array;
+  /** M5c (additive): per-tile stone deposit shadow (KM_Terrain.pas 1385–1388 TileIsStone); decremented
+   *  by DecStoneDeposit (phase 6), read by tileIsStone. Initialized from the tileset stone values so
+   *  that tileIsStone returns the same values until a stonemason mines (v0 does not modify map.tiles
+   *  or grid.walk). Not serialized in any stateSha. */
+  private readonly stoneRemaining: Uint8Array;
   private readonly houseTile: Int32Array; // house uid per tile (0 = none), for ChopTree's stamp rule
   private readonly falling = new Map<number, number>(); // tile index → fall tick
   private readonly offers: Offer[][] = []; // per hand
@@ -545,6 +626,7 @@ export class EconomyWorld {
     this.digOverlay = new Uint8Array(size);
     this.tileLock = new Uint8Array(size);
     this.treeAge = new Uint8Array(size);
+    this.stoneRemaining = new Uint8Array(size);
     this.houseTile = new Int32Array(size);
     this.unitTile = new Int32Array(size);
     this.vertexUsage = new Uint8Array(size);
@@ -582,6 +664,7 @@ export class EconomyWorld {
     }
 
     this.initTreeAges();
+    this.initStoneRemaining();
     this.buildHouses(o.mission);
     this.buildStreets(o.mission);
     this.buildUnits(o.mission);
@@ -718,7 +801,7 @@ export class EconomyWorld {
   addConstructionDemand(house: EconHouse, ware: number, count: number): void {
     if (ware < 0 || ware >= WARE_CNT) throw new Error(`addConstructionDemand: bad ware ${ware}`);
     if (count <= 0) return;
-    this.demands[house.owner].push({ houseUid: house.uid, unitUid: 0, ware, slot: -1, script: true, count, being: 0, construction: true });
+    this.demands[house.owner].push({ houseUid: house.uid, unitUid: 0, ware, slot: -1, script: true, count, being: 0, construction: true, importance: DI_HIGH4 });
   }
 
   // -------------------------------------------------------------------------------------------
@@ -745,6 +828,20 @@ export class EconomyWorld {
         if (treeSpecies(obj, 2) !== null) age = TREE_AGE_2;
         if (treeSpecies(obj, 3) !== null) age = TREE_AGE_FULL;
         this.treeAge[i] = age;
+      }
+    }
+  }
+
+  /** M5c (additive): stoneRemaining per tile from the tileset stone value (TileIsStone, 1385–1388),
+   *  so tileIsStone returns the same values until a stonemason mines. Does not touch map.tiles or
+   *  grid.walk → econsim sha unchanged (no stonemasons in the econsim scenario). */
+  private initStoneRemaining(): void {
+    const g = this.grid;
+    for (let y = 1; y <= this.map.mapY - 1; y++) {
+      for (let x = 1; x <= this.map.mapX - 1; x++) {
+        const i = this.index(x, y);
+        const flags = g.tiles[this.terrainId(x, y)];
+        this.stoneRemaining[i] = flags !== undefined && typeof flags.stone === 'number' ? flags.stone : 0;
       }
     }
   }
@@ -901,8 +998,26 @@ export class EconomyWorld {
       if (spec === undefined) continue;
       for (let slot = 0; slot < 4; slot++) {
         if (spec.resIn[slot] < 0) continue;
-        this.demands[h.owner].push({ houseUid: h.uid, unitUid: 0, ware: spec.resIn[slot], slot, script: false, count: 0, being: 0, construction: false });
+        this.demands[h.owner].push({ houseUid: h.uid, unitUid: 0, ware: spec.resIn[slot], slot, script: false, count: 0, being: 0, construction: false, importance: houseDemandImportance(h.typeId, spec.resIn[slot]) });
       }
+      if (h.typeId === HOUSE_TYPE_BARRACKS) this.addBarracksDemands(h);
+      if (h.typeId === HOUSE_TYPE_STORE) this.addStoreDemands(h);
+    }
+  }
+
+  /** The barracks' WareInput wtWarfare (KM_HouseBarracks.pas 203–206): one always-on demand per warfare ware,
+   *  AddDemand(Self, nil, wtWarfare, 1, dtAlways, diNorm) expanded by the queue (KM_Houses.pas 659). */
+  private addBarracksDemands(h: EconHouse): void {
+    for (let ware = WARFARE_MIN; ware <= WARFARE_MAX; ware++) {
+      this.demands[h.owner].push({ houseUid: h.uid, unitUid: 0, ware, slot: -1, script: false, count: 0, being: 0, construction: false });
+    }
+  }
+
+  /** The store's WareInput wtAll (KM_Houses.pas 657–660, KM_HouseStore): an always-on demand that takes every
+   *  ware (KM_HandLogistics.pas 1863–1870). Expanded per ware here; demandAvailable applies the store rules. */
+  private addStoreDemands(h: EconHouse): void {
+    for (let ware = 0; ware < WARE_CNT; ware++) {
+      this.demands[h.owner].push({ houseUid: h.uid, unitUid: 0, ware, slot: -1, script: false, count: 0, being: 0, construction: false });
     }
   }
 
@@ -1332,8 +1447,14 @@ export class EconomyWorld {
         return this.runGoHome(u, st, task);
       case 'chop':
         return this.runChop(u, st, task);
+      case 'stone':
+        return this.runStone(u, st, task);
       case 'saw':
         return this.runSaw(u, st, task);
+      case 'workshop':
+        return this.runWorkshop(u, st, task);
+      case 'smith':
+        return this.runSmith(u, st, task);
       case 'deliver':
         return this.runDeliver(u, st, task);
       case 'buildHouseArea':
@@ -1555,6 +1676,167 @@ export class EconomyWorld {
     return 'continues';
   }
 
+  // -------------------------------------------------------------------------------------------
+  // M5c stonemason (KM_UnitWorkPlan.pas 500–513; KM_UnitTaskMining.pas 240–339, gsStoneCutter)
+
+  /** runChop mirror for the stonemason: walk to the tile below the stone deposit (dirN), face north,
+   * DecStoneDeposit at phase 6, skip house work acts (phase 9 → 35), produce stone at phase 35.
+   * WalkStyle(..., uaWork, 8, 0, ...) → WorkCyc = 8, AfterWorkDelay = 0. */
+  private runStone(
+    u: EconUnit,
+    st: UnitState,
+    task: { phase: number; plan: StonePlan | null; distant: boolean },
+  ): 'continues' | 'done' {
+    const home = this.homeOf(st);
+    if (home === null) {
+      this.loseHome(u, st);
+      return 'done';
+    }
+    const houseSpec = this.houseState(home).spec;
+    const houseAct = (a: number): number => (houseSpec !== undefined ? houseSpec.animCounts[a] : 0);
+    switch (task.phase) {
+      case 0: // go outside (KM_UnitTaskMining.pas 247–256)
+        this.goOut(u, st, home);
+        task.phase = 1;
+        return 'continues';
+      case 1: {
+        const plan = task.plan;
+        if (plan === null) return 'done';
+        if (!this.walkTo(u, st, plan.loc)) {
+          return this.replanStone(u, st, task);
+        }
+        task.phase = 2;
+        return 'continues';
+      }
+      case 2: {
+        const plan = task.plan;
+        if (plan === null) return 'done';
+        const spot = { x: Math.round(u.posF.x), y: Math.round(u.posF.y) };
+        // The stone deposit is on the tile above the walkable spot (loc.y − 1, KMPointDir(loc, dirN)).
+        if (!samePoint(spot, plan.loc) || !this.tileHasStone(plan.loc.x, plan.loc.y - 1)) {
+          return this.replanStone(u, st, task);
+        }
+        this.setLockedStay(u, st, 0, false);
+        task.phase = 3;
+        return 'continues';
+      }
+      case 3: // before-work stay (281)
+        this.setLockedStay(u, st, 0, false);
+        task.phase = 4;
+        return 'continues';
+      case 4: {
+        // Choose direction (dirN = 1, the stone is above) and time to work (WorkCyc = 8).
+        const plan = task.plan;
+        if (plan === null) return 'done';
+        let dir = 1; // dirN — stone tile is at loc.y − 1
+        const spec = st.spec;
+        if (spec.anim.length > 1) {
+          if (spec.anim[1][dir - 1].count < 1) {
+            for (let d = 1; d <= 8; d++) {
+              if (spec.anim[1][d - 1].count > 1) {
+                dir = d;
+                break;
+              }
+            }
+          }
+        }
+        if (dir >= 1 && dir <= 8) u.dir = dir;
+        const count = spec.anim.length > 1 ? spec.anim[1][dir - 1].count : 0;
+        const timeToWork = 8 * Math.max(count, 1); // WalkStyle(..., uaWork, 8, 0, ...)
+        this.setLockedStay(u, st, timeToWork, true);
+        task.phase = 5;
+        return 'continues';
+      }
+      case 5: // after-work stay (else: 0 ticks, gsStoneCutter is not gsFisherCatch, 300–304)
+        this.setLockedStay(u, st, 0, true);
+        task.phase = 6;
+        return 'continues';
+      case 6: {
+        // DecStoneDeposit(loc.x, loc.y−1) + AfterWorkDelay(0) stay (305–330).
+        const plan = task.plan;
+        if (plan === null) return 'done';
+        task.distant = this.decStoneDeposit(plan.loc.x, plan.loc.y - 1);
+        this.setLockedStay(u, st, 0, true);
+        task.phase = 7;
+        return 'continues';
+      }
+      case 7: {
+        // Go home (333).
+        const target = pointBelowEntrance(home);
+        if (samePoint({ x: Math.round(u.posF.x), y: Math.round(u.posF.y) }, target)) {
+          st.actionLock = 1;
+        } else if (!this.walkTo(u, st, target)) {
+          return 'done';
+        }
+        task.phase = 8;
+        return 'continues';
+      }
+      case 8:
+        this.goIn(u, st, home);
+        task.phase = 9;
+        return 'continues';
+      case 9: {
+        // Back at home (339–366): no resources to take. The house acts run only when stone was acquired
+        // (fDistantResAcquired and fPhase2 < ActCount, KM_UnitTaskMining.pas 355–366); else SKIP_WORK.
+        // The quarry plan is haWork1 x1, haWork2 x9, haWork5 x1 (KM_UnitWorkPlan.pas 500–509).
+        home.state = 'work';
+        if (!task.distant) {
+          task.phase = 35;
+          this.setLockedStay(u, st, 0, false);
+          return 'continues';
+        }
+        this.setLockedStay(u, st, houseAct(0), true);
+        task.phase = 10;
+        return 'continues';
+      }
+      case 10:
+        this.setLockedStay(u, st, houseAct(1) * 9, true);
+        task.phase = 11;
+        return 'continues';
+      case 11:
+        this.setLockedStay(u, st, houseAct(4), true);
+        task.phase = 35;
+        return 'continues';
+      case 35: {
+        // WareAddToOut(wtStone, ResProductionX) + hstIdle + AfterWorkIdle−1 (413–424).
+        if (task.distant) {
+          const slot = this.outSlot(home, WT_STONE);
+          const prod = this.houseState(home).spec?.productionX ?? 1;
+          if (slot >= 0) {
+            home.wareOut[slot] += prod;
+            this.addOffer(home.uid, WT_STONE, prod);
+            this.emit('stone-out', `quarry#${home.uid} ${home.wareOut[slot]}`);
+          }
+        }
+        home.state = 'idle';
+        this.setLockedStay(u, st, this.afterWorkIdle(home), false);
+        task.phase = 36;
+        return 'continues';
+      }
+      default:
+        return 'done';
+    }
+  }
+
+  private replanStone(
+    u: EconUnit,
+    st: UnitState,
+    task: { phase: number; plan: StonePlan | null; distant: boolean },
+  ): 'continues' | 'done' {
+    const home = this.homeOf(st);
+    if (home === null) {
+      this.loseHome(u, st);
+      return 'done';
+    }
+    const plan = this.chooseStonePlan(home, st);
+    if (plan === null) return 'done'; // no other work plan (KM_UnitTaskMining.pas 141–159)
+    task.plan = plan;
+    task.phase = 1; // re-walk to the new spot
+    this.setLockedStay(u, st, 0, false);
+    this.emit('stone-plan', `loc=(${plan.loc.x},${plan.loc.y})`);
+    return 'continues';
+  }
+
   private runSaw(u: EconUnit, st: UnitState, task: { phase: number; phase2: number }): 'continues' | 'done' {
     const home = this.homeOf(st);
     if (home === null) {
@@ -1619,6 +1901,231 @@ export class EconomyWorld {
         home.state = 'idle';
         this.setLockedStay(u, st, this.afterWorkIdle(home), false);
         task.phase = 36;
+        return 'continues';
+      }
+      default:
+        return 'done';
+    }
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // M5c smith (KM_UnitWorkPlan.pas 411–451; KM_UnitTaskMining.pas 240–367, htWeaponWorkshop/utSmith)
+
+  /** runSaw mirror for the smith: HasToWalk=False (skip to phase 9), take 2 timber, 3 work cycles,
+   * produce 1 axe at phase 35, emit `ware-produced`. ResourcePlan(wtTimber,2,wtNone,0,wtAxe). */
+  private runSmith(u: EconUnit, st: UnitState, task: { phase: number; phase2: number }): 'continues' | 'done' {
+    const home = this.homeOf(st);
+    if (home === null) {
+      this.loseHome(u, st);
+      return 'done';
+    }
+    const spec = this.houseState(home).spec;
+    const anim = (act: number): number => (spec !== undefined ? spec.animCounts[act] : 0);
+    switch (task.phase) {
+      case 0: // HasToWalk = False → skip to phase 9 (KM_UnitTaskMining.pas 257–263)
+        this.setLockedStay(u, st, 0, false);
+        task.phase = 9;
+        return 'continues';
+      case 9: {
+        // Take 2 timber from input + first house act.
+        const slot = this.inSlot(home, WT_TIMBER);
+        if (slot >= 0 && home.wareIn[slot] >= 2) home.wareIn[slot] -= 2;
+        home.state = 'work';
+        home.workAnimStep = 0;
+        this.emit('timber-taken', `workshop#${home.uid} in=${slot >= 0 ? home.wareIn[slot] : 0}`);
+        this.setLockedStay(u, st, anim(0), true);
+        task.phase2 = 0;
+        task.phase = 10;
+        return 'continues';
+      }
+      case 10:
+        task.phase2 += 1;
+        if (task.phase2 < 3) {
+          home.workAnimStep = 0;
+          // SubActAdd(haWork2, 1) → TimeToWork = Count × 25 (KM_UnitWorkPlan.pas 380).
+          this.setLockedStay(u, st, anim(1) * 25, true);
+          task.phase = 11;
+          return 'continues';
+        }
+        task.phase = 35;
+        this.setLockedStay(u, st, 0, false);
+        return 'continues';
+      case 11:
+        task.phase2 += 1;
+        if (task.phase2 < 3) {
+          home.workAnimStep = 0;
+          this.setLockedStay(u, st, Math.max(anim(4) - 1, 0), true);
+          task.phase = 12;
+          return 'continues';
+        }
+        task.phase = 35;
+        this.setLockedStay(u, st, 0, false);
+        return 'continues';
+      case 12:
+        task.phase = 35;
+        this.setLockedStay(u, st, 0, false);
+        return 'continues';
+      case 35: {
+        // WareAddToOut(wtAxe, 1) + ProcWareProduced + hstIdle + AfterWorkIdle−1.
+        const slot = this.outSlot(home, WT_AXE);
+        const prod = spec?.productionX ?? 1;
+        if (slot >= 0) {
+          home.wareOut[slot] += prod;
+          this.addOffer(home.uid, WT_AXE, prod);
+          this.emit('ware-produced', `/ axe house#${home.uid} ${home.wareOut[slot]}`);
+        }
+        home.state = 'idle';
+        this.setLockedStay(u, st, this.afterWorkIdle(home), false);
+        task.phase = 36;
+        return 'continues';
+      }
+      default:
+        return 'done';
+    }
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // M5e workshops (KM_UnitWorkPlan.pas 376–421; KM_Houses.pas 1575–1649 PickOrder; KM_ResWares.pas 72–83)
+
+  private wareInCount(h: EconHouse, ware: number): number {
+    const slot = ware >= 0 ? this.inSlot(h, ware) : -1;
+    return slot >= 0 ? h.wareIn[slot] : 0;
+  }
+
+  private wareOutCount(h: EconHouse, ware: number): number {
+    const slot = ware >= 0 ? this.outSlot(h, ware) : -1;
+    return slot >= 0 ? h.wareOut[slot] : 0;
+  }
+
+  /** TKMHouse.SetWareOrder (KM_Houses.pas 1555–1565): WareOrder[resI] for output slot resI (1..4). */
+  setWareOrder(houseUid: number, resI: number, amount: number): void {
+    const h = this.houseByUid(houseUid);
+    if (h === null || h.destroyed || resI < 1 || resI > 4) return;
+    const orders = this.houseState(h).wareOrder;
+    if (orders === undefined) return;
+    orders[resI - 1] = clamp(Math.trunc(amount), 0, MAX_WARES_ORDER);
+  }
+
+  /** WareOrder[resI] of a workshop (KM_Houses.pas 1549). */
+  wareOrderOf(houseUid: number, resI: number): number {
+    const h = this.houseByUid(houseUid);
+    if (h === null || resI < 1 || resI > 4) return 0;
+    return this.houseState(h).wareOrder?.[resI - 1] ?? 0;
+  }
+
+  /**
+   * TKMHouse.PickOrder (KM_Houses.pas 1575–1601, FEAT_WARFARE_ORDER_SEQUENTIAL): the next output slot in
+   * round-robin order with an order left, free output room and the input wares. The order is consumed
+   * when picked (Dec, :1637). Returns the output slot (0..3), or -1.
+   */
+  private pickOrder(home: EconHouse): number {
+    const st = this.houseState(home);
+    const spec = st.spec;
+    const orders = st.wareOrder;
+    if (spec === undefined || orders === undefined) return -1;
+    const last = st.lastOrderProduced ?? 0;
+    for (let i = 0; i < 4; i++) {
+      const resI = ((last + i) % 4) + 1;
+      const slot = resI - 1;
+      const ware = spec.resOut[slot];
+      if (ware < 0 || orders[slot] <= 0) continue;
+      if (this.wareOutCount(home, ware) >= MAX_WARES_IN_HOUSE) continue;
+      const cost = WARFARE_COSTS[ware];
+      if (cost === undefined) continue;
+      const [c1, c2] = cost;
+      if (!(c1 !== c2 || this.wareInCount(home, c1) > 1)) continue;
+      if (!(c1 < 0 || this.wareInCount(home, c1) > 0)) continue;
+      if (!(c2 < 0 || this.wareInCount(home, c2) > 0)) continue;
+      st.lastOrderProduced = resI;
+      orders[slot] -= 1;
+      return slot;
+    }
+    return -1;
+  }
+
+  /** The house acts of a workshop plan (KM_UnitWorkPlan.pas 376–421), as stay lengths: an axe/lance/bow
+   *  plan is haWork1, three (haWork2+3+4), haWork5; a wooden shield is four (haWork2+3+4) and haWork2 x0.25. */
+  private workshopSteps(product: number, spec: HouseSpec): number[] {
+    const act = (a: number): number => spec.animCounts[a] ?? 0;
+    const steps: number[] = [];
+    if (product === WT_WOODEN_SHIELD) {
+      for (let i = 0; i < 4; i++) steps.push(act(1), act(2), act(3));
+      steps.push(Math.round(act(1) * 0.25));
+      return steps;
+    }
+    steps.push(act(0));
+    for (let i = 0; i < 3; i++) steps.push(act(1), act(2), act(3));
+    steps.push(act(4));
+    return steps;
+  }
+
+  /** TaskGetWork for a carpenter at a workshop (KM_Units.pas 714–752): PickOrder, then the task is kept only
+   *  when its inputs and the output room are there (the Pascal discards it otherwise, :744–752). */
+  private workshopTask(home: EconHouse): Task | null {
+    const slot = this.pickOrder(home);
+    if (slot < 0) return null;
+    const spec = this.houseState(home).spec;
+    if (spec === undefined) return null;
+    const product = spec.resOut[slot];
+    const costs = (WARFARE_COSTS[product] ?? [-1, -1]).filter((w) => w >= 0);
+    for (const ware of new Set(costs)) {
+      if (this.wareInCount(home, ware) < costs.filter((w) => w === ware).length) return null;
+    }
+    if (this.wareOutCount(home, product) >= MAX_WARES_IN_HOUSE) return null;
+    return { kind: 'workshop', phase: 0, phase2: 0, product, costs, steps: this.workshopSteps(product, spec), stepIdx: 0 };
+  }
+
+  /** TKMTaskMining for a workshop (KM_UnitTaskMining.pas 339–424): the carpenter is inside, takes the input
+   *  wares (WareTakeFromIn), works the house acts (SubActionWork), then WareAddToOut(product, ResProductionX). */
+  private runWorkshop(
+    u: EconUnit,
+    st: UnitState,
+    task: { phase: number; phase2: number; product: number; costs: number[]; steps: number[]; stepIdx: number },
+  ): 'continues' | 'done' {
+    const home = this.homeOf(st);
+    if (home === null) {
+      this.loseHome(u, st);
+      return 'done';
+    }
+    const spec = this.houseState(home).spec;
+    switch (task.phase) {
+      case 0:
+        this.setLockedStay(u, st, 0, false);
+        task.phase = 1;
+        return 'continues';
+      case 1: {
+        home.state = 'work';
+        home.workAnimStep = 0;
+        for (const ware of task.costs) {
+          const slot = this.inSlot(home, ware);
+          if (slot >= 0 && home.wareIn[slot] > 0) home.wareIn[slot] -= 1;
+        }
+        this.emit('workshop-start', `workshop#${home.uid} product=${task.product}`);
+        task.phase = 2;
+        this.setLockedStay(u, st, 0, true);
+        return 'continues';
+      }
+      case 2:
+        if (task.stepIdx < task.steps.length) {
+          const time = task.steps[task.stepIdx];
+          task.stepIdx += 1;
+          this.setLockedStay(u, st, time, true);
+          return 'continues';
+        }
+        task.phase = 3;
+        this.setLockedStay(u, st, 0, false);
+        return 'continues';
+      case 3: {
+        const slot = this.outSlot(home, task.product);
+        const prod = spec !== undefined ? spec.productionX : 1;
+        if (slot >= 0) {
+          home.wareOut[slot] += prod;
+          this.addOffer(home.uid, task.product, prod);
+          this.emit('ware-produced', `house#${home.uid} ware=${task.product} ${home.wareOut[slot]}`);
+        }
+        home.state = 'idle';
+        this.setLockedStay(u, st, this.afterWorkIdle(home), false);
+        task.phase = 4;
         return 'continues';
       }
       default:
@@ -1874,6 +2381,7 @@ export class EconomyWorld {
       if (h.destroyed) continue;
       const hs = this.houseState(h);
       if (hs.spec === undefined) continue;
+      if (h.owner !== u.owner) continue; // gHands[Owner].Houses.FindEmptyHouse (KM_Units.pas 467)
       if (hs.spec.workerType !== u.type) continue;
       // A barracks holds many recruits (SetWorker is skipped for htBarracks, KM_Units.pas 471–472).
       if (h.typeId !== 21 && hs.workerUid !== 0) continue;
@@ -1914,6 +2422,49 @@ export class EconomyWorld {
       const hasRoom = outSlot < 0 || home.wareOut[outSlot] < MAX_WARES_IN_HOUSE;
       if (hasTrunk && hasRoom) {
         st.task = { kind: 'saw', phase: 0, phase2: 0 };
+        return;
+      }
+      this.setUnlockedStay(u, st, this.restStay(home));
+      return;
+    }
+
+    // M5c: stonemason at htQuarry (KM_UnitTaskMining.pas 500–513; FindStone 2584–2628).
+    if (u.type === 10 && home.typeId === 14) {
+      // Refuse when the stone output is full (748–752 / 724–728).
+      const outSlot = this.outSlot(home, WT_STONE);
+      if (outSlot >= 0 && home.wareOut[outSlot] >= MAX_WARES_IN_HOUSE) {
+        this.setUnlockedStay(u, st, this.restStay(home));
+        return;
+      }
+      const plan = this.chooseStonePlan(home, st);
+      if (plan === null) {
+        this.setUnlockedStay(u, st, this.restStay(home));
+        return;
+      }
+      st.task = { kind: 'stone', phase: 0, plan, distant: false };
+      this.emit('stone-plan', `loc=(${plan.loc.x},${plan.loc.y})`);
+      return;
+    }
+
+    // M5c: smith at htWeaponWorkshop (KM_UnitWorkPlan.pas 411–451; ResourcePlan wtTimber,2→wtAxe).
+    if (u.type === 11 && home.typeId === 19) {
+      // Needs 2 timber in and room for the axe output (746–749).
+      const inSlot = this.inSlot(home, WT_TIMBER);
+      const outSlot = this.outSlot(home, WT_AXE);
+      const hasTimber = inSlot >= 0 && home.wareIn[inSlot] >= 2;
+      const hasRoom = outSlot < 0 || home.wareOut[outSlot] < MAX_WARES_IN_HOUSE;
+      if (hasTimber && hasRoom) {
+        st.task = { kind: 'smith', phase: 0, phase2: 0 };
+        return;
+      }
+      this.setUnlockedStay(u, st, this.restStay(home));
+      return;
+    }
+
+    if (u.type === UNIT_CARPENTER && (home.typeId === HOUSE_TYPE_WEAPON_WORKSHOP || home.typeId === HOUSE_TYPE_ARMOR_WORKSHOP)) {
+      const task = this.workshopTask(home);
+      if (task !== null) {
+        st.task = task;
         return;
       }
       this.setUnlockedStay(u, st, this.restStay(home));
@@ -1986,9 +2537,10 @@ export class EconomyWorld {
     if (h.destroyed) return;
     const st = this.houseState(h);
     if (st.stock !== null) {
-      // Store (KM_HouseStore.pas 96–112): clamp the stock and create an offer.
+      // Store (KM_HouseStore.pas 96–112): clamp the stock and create an offer. A barracks (M5e) keeps
+      // the stock but makes no offer: its takeout mode is off by default (KM_HouseBarracks.pas 319–320).
       st.stock[ware] = Math.min(65535, st.stock[ware] + 1);
-      this.addOffer(h.uid, ware, 1);
+      if (h.typeId !== HOUSE_TYPE_BARRACKS) this.addOffer(h.uid, ware, 1);
       return;
     }
     const slot = this.inSlot(h, ware);
@@ -2019,8 +2571,19 @@ export class EconomyWorld {
     }
     const h = this.houseByUid(d.houseUid);
     if (h === null || h.destroyed) return 0;
+    // A barracks warfare demand has no input slot: the barracks takes every warfare ware (no cap).
+    if (d.slot < 0) {
+      if (h.typeId === HOUSE_TYPE_STORE) return this.storeAccepts(h, d.ware) ? STORE_NO_CAP : 0;
+      return Math.max(1 - d.being, 0);
+    }
     const cap = MAX_WARES_IN_HOUSE; // GetWareDistribution default 5 (KM_WareDistribution.pas 71–88)
     return clamp(cap - h.wareIn[d.slot] - d.being, 0, MAX_WARES_IN_HOUSE);
+  }
+
+  /** A store takes a ware unless it is warfare and the hand has a barracks (KM_HandLogistics.pas 1243–1250). */
+  private storeAccepts(store: EconHouse, ware: number): boolean {
+    if (ware < WARFARE_MIN || ware > WARFARE_MAX) return true;
+    return this.handHouseTotalCount(store.owner, HOUSE_TYPE_BARRACKS) === 0;
   }
 
   private isIdleSerf(idx: number): boolean {
@@ -2049,16 +2612,8 @@ export class EconomyWorld {
       for (const d of demands) if (this.demandAvailable(d) > 0) wanted.add(d.ware);
       if (wanted.size === 0) break;
 
-      // Offer houses that could serve some demand (one road BFS per house per pass, cached).
+      // One road BFS and one nearest-serf search per offer house per pass (cached).
       const distCache = new Map<number, Int32Array>();
-      const offerUids: number[] = [];
-      for (const o of offers) {
-        if (o.count <= 0 || !wanted.has(o.ware)) continue;
-        const oh = this.houseByUid(o.houseUid);
-        if (oh === null || oh.destroyed) continue;
-        if (!offerUids.includes(o.houseUid)) offerUids.push(o.houseUid);
-      }
-      if (offerUids.length === 0) break;
       const distances = (house: EconHouse): Int32Array => {
         let d = distCache.get(house.uid);
         if (d === undefined) {
@@ -2067,104 +2622,110 @@ export class EconomyWorld {
         }
         return d;
       };
+      const serfCache = new Map<number, { serf: number; len: number }>();
+      const nearestSerf = (house: EconHouse): { serf: number; len: number } => {
+        let s = serfCache.get(house.uid);
+        if (s === undefined) {
+          s = { serf: -1, len: Number.POSITIVE_INFINITY };
+          for (const si of idle) {
+            const su = this.units[si];
+            const from = { x: Math.round(su.posF.x), y: Math.round(su.posF.y) };
+            const route = findPath(this.grid, from, pointBelowEntrance(house));
+            if (route === null) continue;
+            if (route.length < s.len) s = { serf: si, len: route.length };
+          }
+          serfCache.set(house.uid, s);
+        }
+        return s;
+      };
 
-      let assigned = false;
+      // The bid (KM_HandLogistics.pas 551–577, CompareBids 2356–2367): over all valid (offer, demand) pairs the
+      // most important demand wins, then the lowest cost; a tie keeps the first pair found (offer order, then demand order).
+      let win: { offer: Offer; demand: Demand; house: EconHouse; serf: number; imp: number; cost: number } | null = null;
       for (const offer of offers) {
-        if (offer.count <= 0) continue;
+        if (offer.count <= 0 || !wanted.has(offer.ware)) continue;
         const offerHouse = this.houseByUid(offer.houseUid);
         if (offerHouse === null || offerHouse.destroyed) continue;
         const dist = distances(offerHouse);
-
-        // Nearest valid demand by road distance (roadGrid BFS); a unit demand uses the walk route
-        // (KM_HandLogistics.pas 1223–1226) and the diagonal metric as its v0 bid.
-        let bestDemand: Demand | null = null;
-        let bestDist = Number.POSITIVE_INFINITY;
+        const offerIsStore = offerHouse.typeId === HOUSE_TYPE_STORE;
         for (const d of demands) {
           if (d.ware !== offer.ware) continue;
+          const imp = d.importance ?? DI_NORM;
+          if (win !== null && imp < win.imp) continue;
           if (d.houseUid === offer.houseUid && d.unitUid === 0) continue; // no same-house deliveries
           if (this.demandAvailable(d) <= 0) continue;
+          let cost: number;
           if (d.unitUid !== 0) {
+            // A unit demand uses the walk route (KM_HandLogistics.pas 1223–1226): its step count is the cost.
             const target = this.unitByUid(d.unitUid);
             if (target === null || target.dead) continue;
             const tp = this.roundPos(target);
             if (!this.routeCanBeMade(pointBelowEntrance(offerHouse), tp)) continue; // tpWalk route
-            const dd = euclid(pointBelowEntrance(offerHouse), tp);
-            if (dd < bestDist) {
-              bestDist = dd;
-              bestDemand = d;
-            }
-            continue;
+            const walk = findPath(this.grid, pointBelowEntrance(offerHouse), tp);
+            if (walk === null) continue;
+            cost = walk.length;
+          } else {
+            const dHouse = this.houseByUid(d.houseUid);
+            if (dHouse === null || dHouse.destroyed) continue;
+            // No store→store (v0) — except into a WIP store (KM_HandLogistics.pas 1267–1270: a store
+            // that is still being built accepts building materials from another store).
+            if (offerIsStore && dHouse.typeId === HOUSE_TYPE_STORE && dHouse.buildState === 'done') continue;
+            const target = pointBelowEntrance(dHouse);
+            const road = dist[this.index(target.x, target.y)];
+            if (road < 0) continue; // no road route
+            cost = road;
+            // Always prefer House>House to House>Store (KM_HandLogistics.pas 1587–1590: the wtAll bid gets +1000).
+            if (dHouse.typeId === HOUSE_TYPE_STORE) cost += STORE_BID_PENALTY;
           }
-          const dHouse = this.houseByUid(d.houseUid);
-          if (dHouse === null || dHouse.destroyed) continue;
-          // No store→store (v0) — except into a WIP store (KM_HandLogistics.pas 1267–1270: a store
-          // that is still being built accepts building materials from another store).
-          if (offerHouse.typeId === 11 && dHouse.typeId === 11 && dHouse.buildState === 'done') continue;
-          const target = pointBelowEntrance(dHouse);
-          const dd = dist[this.index(target.x, target.y)];
-          if (dd < 0) continue; // no road route
-          if (dd < bestDist) {
-            bestDist = dd;
-            bestDemand = d;
-          }
+          // Prefer taking wares from a house rather than a store, except warfare (KM_HandLogistics.pas 1587–1590).
+          if (offerIsStore && (d.ware < WARFARE_MIN || d.ware > WARFARE_MAX)) cost += STORE_BID_PENALTY;
+          if (win !== null && imp === win.imp && cost >= win.cost) continue;
+          const serf = nearestSerf(offerHouse);
+          if (serf.serf < 0) continue; // no idle serf can walk to the offer (AnySerfCanDoDelivery)
+          win = { offer, demand: d, house: offerHouse, serf: serf.serf, imp, cost };
         }
-        if (bestDemand === null) continue;
-
-        // Nearest idle eligible serf (tpWalk route to the offer house).
-        let bestSerf = -1;
-        let bestLen = Number.POSITIVE_INFINITY;
-        for (const si of idle) {
-          const su = this.units[si];
-          const from = { x: Math.round(su.posF.x), y: Math.round(su.posF.y) };
-          const route = findPath(this.grid, from, pointBelowEntrance(offerHouse));
-          if (route === null) continue;
-          if (route.length < bestLen) {
-            bestLen = route.length;
-            bestSerf = si;
-          }
-        }
-        if (bestSerf < 0) continue;
-
-        // Assign (TKMDeliveries.AssignDelivery 2151–2194).
-        offer.count -= 1;
-        bestDemand.being += 1;
-        const su = this.units[bestSerf];
-        const sst = this.unitStates[bestSerf];
-        const targetHouse = bestDemand.unitUid !== 0 ? null : this.houseByUid(bestDemand.houseUid);
-        const deliverKind: 'house' | 'construction' | 'unit' =
-          bestDemand.unitUid !== 0
-            ? 'unit'
-            : targetHouse !== null && targetHouse.buildState !== 'done'
-              ? 'construction'
-              : 'house';
-        sst.task = {
-          kind: 'deliver',
-          phase: 0,
-          fromUid: offer.houseUid,
-          toUid: bestDemand.unitUid !== 0 ? 0 : bestDemand.houseUid,
-          toUnitUid: bestDemand.unitUid,
-          ware: offer.ware,
-          demand: bestDemand,
-          taken: false,
-          // fDeliverKind is decided when the task is created (KM_UnitTaskDelivery.pas 81–86, 105).
-          deliverKind,
-        };
-        sst.walk = null;
-        sst.actionLock = 0;
-        sst.locked = false;
-        su.action = 'stay';
-        su.taskKind = 'deliver';
-        this.emit(
-          'delivery-assigned',
-          `ware=${offer.ware} house#${offerHouse.uid}->${bestDemand.unitUid !== 0 ? `unit#${bestDemand.unitUid}` : `house#${targetHouse !== null ? targetHouse.uid : 0}`}`,
-        );
-        const at = idle.indexOf(bestSerf);
-        if (at >= 0) idle.splice(at, 1);
-        assigned = true;
-        break;
       }
+      if (win === null) break;
 
-      if (!assigned) break;
+      // Assign (TKMDeliveries.AssignDelivery 2151–2194).
+      const offer = win.offer;
+      const bestDemand = win.demand;
+      const offerHouse = win.house;
+      const bestSerf = win.serf;
+      offer.count -= 1;
+      bestDemand.being += 1;
+      const su = this.units[bestSerf];
+      const sst = this.unitStates[bestSerf];
+      const targetHouse = bestDemand.unitUid !== 0 ? null : this.houseByUid(bestDemand.houseUid);
+      const deliverKind: 'house' | 'construction' | 'unit' =
+        bestDemand.unitUid !== 0
+          ? 'unit'
+          : targetHouse !== null && targetHouse.buildState !== 'done'
+            ? 'construction'
+            : 'house';
+      sst.task = {
+        kind: 'deliver',
+        phase: 0,
+        fromUid: offer.houseUid,
+        toUid: bestDemand.unitUid !== 0 ? 0 : bestDemand.houseUid,
+        toUnitUid: bestDemand.unitUid,
+        ware: offer.ware,
+        demand: bestDemand,
+        taken: false,
+        // fDeliverKind is decided when the task is created (KM_UnitTaskDelivery.pas 81–86, 105).
+        deliverKind,
+      };
+      sst.walk = null;
+      sst.actionLock = 0;
+      sst.locked = false;
+      su.action = 'stay';
+      su.taskKind = 'deliver';
+      this.emit(
+        'delivery-assigned',
+        `ware=${offer.ware} house#${offerHouse.uid}->${bestDemand.unitUid !== 0 ? `unit#${bestDemand.unitUid}` : `house#${targetHouse !== null ? targetHouse.uid : 0}`}`,
+      );
+      const at = idle.indexOf(bestSerf);
+      if (at >= 0) idle.splice(at, 1);
     }
   }
 
@@ -2240,6 +2801,34 @@ export class EconomyWorld {
       const spot = this.chooseCuttingDirection(center, t);
       if (spot === null) continue;
       out.push(spot);
+    }
+    return out;
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // M5c stone plan (KM_Terrain.pas 2584–2628: FindStoneLocs + FindStone)
+
+  /** FindStone (KM_Terrain.pas 2613–2628): the spot is picked uniformly, GetRandom = KaMRandom(Count) (one draw). */
+  private chooseStonePlan(home: EconHouse, st: UnitState): StonePlan | null {
+    const center = pointBelowEntrance(home);
+    const radius = st.spec.miningRange ?? 0;
+    const stoneList = this.findStoneLocs(center, radius);
+    if (stoneList.length === 0) return null;
+    return stoneList[this.drawN(stoneList.length)];
+  }
+
+  /** FindStoneLocs (KM_Terrain.pas 2584–2608): walkable tiles whose north neighbor has stone,
+   * not tile-locked, with a route from the center (tpWalk). Returns the walkable tile below the
+   * deposit; the stonemason faces dirN (north) to the stone at loc.y − 1. */
+  private findStoneLocs(center: Pt, radius: number): StonePlan[] {
+    const out: StonePlan[] = [];
+    const tiles = this.tilesWithinDistance(center, radius);
+    for (const t of tiles) {
+      if (t.y < 2) continue; // Can't mine stone from top row (TileIsStone would read y-1=0)
+      if (!this.tileHasStone(t.x, t.y - 1)) continue;
+      if (this.tileLock[this.index(t.x, t.y)] !== TL_NONE) continue; // TileIsLocked
+      if (!this.routeCanBeMade(center, t)) continue;
+      out.push({ loc: t });
     }
     return out;
   }
@@ -2777,8 +3366,11 @@ export class EconomyWorld {
         count: 0,
         being: 0,
         construction: false,
+        importance: houseDemandImportance(h.typeId, spec.resIn[slot]),
       });
     }
+    if (h.typeId === HOUSE_TYPE_BARRACKS) this.addBarracksDemands(h);
+    if (h.typeId === HOUSE_TYPE_STORE) this.addStoreDemands(h);
   }
 
   /** The Activate diagonal fix (703–716): clear non-tree objects blocking the entrance diagonals. */
@@ -3522,6 +4114,7 @@ export class EconomyWorld {
       count,
       being: 0,
       construction: false,
+      importance: DI_HIGH4,
     });
   }
 
@@ -3777,9 +4370,11 @@ export class EconomyWorld {
   // M5b AI world API (docs/M5-AI-NOTES.md §3 checklist): the terrain/stat queries the ported
   // newAI reads (packages/sim/ai.ts). All additive; the viewer/tests are unaffected.
 
-  /** TileIsStone (KM_Terrain.pas 1385–1388): the Stone deposit of the tile's terrain (0 = none). */
+  /** TileIsStone (KM_Terrain.pas 1385–1388): the Stone deposit of the tile (0 = none). Reads the
+   *  per-tile stoneRemaining shadow (DecStoneDeposit decrements it; see M5c). */
   tileIsStone(x: number, y: number): number {
-    return this.tileDeposit(x, y, 'stone');
+    if (!this.inMapCoords(x, y)) return 0;
+    return this.stoneRemaining[this.index(x, y)];
   }
 
   /** TileIsCoal (1391–1394). */
@@ -3845,6 +4440,19 @@ export class EconomyWorld {
     if (flags === undefined) return 0;
     const v = flags[field];
     return typeof v === 'number' ? v : 0;
+  }
+
+  /** DecStoneDeposit (KM_Terrain.pas 3484–3716): extract one unit of stone from a deposit. v0 only
+   *  decrements the stoneRemaining shadow (the full terrain-transition floodfill is deferred); does
+   *  not modify map.tiles or grid.walk → econsim/buildsim/mapscan shas unchanged. */
+  private decStoneDeposit(x: number, y: number): boolean {
+    if (!this.inMapCoords(x, y)) return false;
+    const i = this.index(x, y);
+    if (this.stoneRemaining[i] > 0) {
+      this.stoneRemaining[i] -= 1;
+      return true;
+    }
+    return false;
   }
 
   /** TileIsSoil (KM_Terrain.pas 1523–1526): the tiles.json Soil flag. */
@@ -3953,7 +4561,7 @@ export class EconomyWorld {
     const st = this.houseState(h);
     if (st.stock !== null) {
       st.stock[ware] = Math.min(65535, st.stock[ware] + amount);
-      this.addOffer(h.uid, ware, amount);
+      if (h.typeId !== HOUSE_TYPE_BARRACKS) this.addOffer(h.uid, ware, amount);
       return true;
     }
     const inSlot = this.inSlot(h, ware);
@@ -4820,8 +5428,14 @@ export class EconomyWorld {
     if (fog !== undefined && spec !== undefined) {
       for (const c of this.houseCells(house)) fog.reveal(c.x, c.y, spec.sight ?? 0, true);
     }
+    if (typeId === HOUSE_TYPE_BARRACKS) this.addBarracksDemands(house); // Activate (701) for the barracks' warfare demands
     this.walkConnectDirty = true;
     return house;
+  }
+
+  /** AddDemandsOnActivate (KM_Houses.pas 649–666) for a house made by spawnHouse: one demand per WareInput slot. */
+  addInputDemands(house: EconHouse): void {
+    this.addDemandsOnActivate(house);
   }
 
   /** The frozen group-orders API (docs/M4-SPIKE.md §3). */
@@ -4938,17 +5552,19 @@ export class EconomyWorld {
   }
 
   /**
-   * CanEquip (KM_HouseBarracks.pas 331–341). Simplified: the recruit count and the hand's stock
-   * stand in for the barracks' own ware slots (the v0 world has no WareOrder to the barracks), and
-   * Locks.GetUnitBlocked is not checked (no unit locks in v0).
+   * CanEquip (KM_HouseBarracks.pas 331–341): a recruit waits, and the barracks' own warfare stock
+   * (fResourceCount, filled by serf deliveries, M5e) holds each TROOP_COST ware. Locks.GetUnitBlocked
+   * is not checked (no unit locks in v0).
    */
   barracksCanEquip(houseUid: number, unitType: number): boolean {
     const h = this.houseByUid(houseUid);
     const cost = TROOP_COST[unitType];
     if (h === null || h.destroyed || h.buildState !== 'done' || h.typeId !== HOUSE_TYPE_BARRACKS || cost === undefined) return false;
     if (this.barracksRecruitCount(houseUid) === 0) return false;
+    const stock = this.houseState(h).stock;
+    if (stock === null) return false;
     for (const ware of new Set(cost)) {
-      if (this.handOutWareBalance(h.owner, ware) < cost.filter((w) => w === ware).length) return false;
+      if ((stock[ware] ?? 0) < cost.filter((w) => w === ware).length) return false;
     }
     return true;
   }
@@ -4962,7 +5578,8 @@ export class EconomyWorld {
   barracksEquip(houseUid: number, unitType: number): EconUnit | null {
     if (!this.barracksCanEquip(houseUid, unitType)) return null;
     const h = this.houseByUid(houseUid) as EconHouse;
-    for (const ware of TROOP_COST[unitType]) this.takeHouseOutWare(h.owner, ware);
+    const stock = this.houseState(h).stock as Int32Array;
+    for (const ware of TROOP_COST[unitType]) stock[ware] -= 1;
     const recruit = this.units.find((u) => u.homeUid === houseUid && u.type === UNIT_RECRUIT && u.inside && !u.dead);
     if (recruit !== undefined) this.closeUnit(recruit);
     const door = pointBelowEntrance(h);

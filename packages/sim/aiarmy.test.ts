@@ -191,15 +191,16 @@ test('barracks: a recruit waits inside, the wares are taken, the recruit is repl
   const w = makeWorld();
   const store = w.spawnHouse(HT_STORE, 5, 5, 0);
   assert.ok(store.uid > 0);
+  const barracks = w.spawnHouse(HT_BARRACKS, 12, 5, 0);
+  w.houseCreatedFor(0, HT_BARRACKS);
+  // M5e: the barracks keeps its own warfare stock (KM_HouseBarracks.pas 16, 184–198); serfs deliver it.
   for (const [ware, n] of [
     [WT_AXE, 2],
     [WT_WOODEN_SHIELD, 1],
     [WT_LEATHER_ARMOR, 1],
   ] as const) {
-    assert.equal(w.addWareToStore(0, ware, n), true);
+    assert.equal(w.addWareToHouseFromScript(barracks.uid, ware, n), true);
   }
-  const barracks = w.spawnHouse(HT_BARRACKS, 12, 5, 0);
-  w.houseCreatedFor(0, HT_BARRACKS);
   const recruit = w.barracksAddRecruit(barracks.uid);
   assert.ok(recruit !== null);
   assert.equal(w.barracksRecruitCount(barracks.uid), 1);

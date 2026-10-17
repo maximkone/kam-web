@@ -225,7 +225,7 @@ test('house commands: train a school queue, equip a barracks, destroy an own hou
   const barracks = finishedHouse(w, HT_BARRACKS, 20, 14, 0);
   w.barracksAddRecruit(barracks.uid);
   w.barracksAddRecruit(barracks.uid);
-  w.addWareToStore(0, WT_AXE, 2);
+  assert.equal(w.addWareToHouseFromScript(barracks.uid, WT_AXE, 2), true); // KM_HouseBarracks.pas 331-341: CanEquip reads the barracks' own stock
   assert.deepEqual(TROOP_COST[UT_MILITIA], [WT_AXE]);
   assert.deepEqual(applyCommand(w, { hand: 0, tick: t, type: 'houseEquip', houseUid: barracks.uid, soldierType: UT_MILITIA, count: 3 }), { ok: true });
   assert.equal(w.barracksRecruitCount(barracks.uid), 0, 'both recruits were equipped (the third had none)');

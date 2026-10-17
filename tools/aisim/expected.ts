@@ -2,8 +2,13 @@
 // military half). Worker M froze the economy run from the first deterministic run of
 // `node tools/aisim/cli.ts --check`; worker N (M5c) re-froze it once, because the Supervisor's mine
 // division is now part of the economy run (docs/M5-SPIKE.md 7.5, "Economy numbers moved"): the old
-// economy sha f62714ce… is reproduced by the same run with the division switched off. Two consecutive
-// runs of the check print identical numbers and sha256s (both phases).
+// economy sha f62714ce… is reproduced by the same run with the division switched off. Worker Q3 re-froze
+// all three phases (docs/M5-SPIKE.md 7.7): the store's always-on demand (KM_Houses.pas 657–660), the
+// importance-first bids (KM_HandLogistics.pas 551–577) and the House>Store bid penalty (1583–1590) move the
+// economy, attack and organic numbers; the causes are in 7.7. Worker Q4 re-froze all three again (7.8): the
+// global best bid (KM_HandLogistics.pas 551–577, 2356–2367) and the store-offer penalty (1587–1590) move them.
+// Two consecutive runs of the check print
+// identical numbers and sha256s (both phases).
 export const TICKS = 30000;
 
 /** The attack run's length (docs/M5-SPIKE.md 7.5): the economy plus the army against the enemies' stores. */
@@ -13,14 +18,15 @@ export const ATTACK_TICKS = 12000;
 export const ORGANIC_TICKS = 60000;
 
 /**
- * The frozen organic chain (worker N2, docs/M5-SPIKE.md 7.6): the economy scenario with no military grants,
- * 60000 ticks. No link is reached: no stone is produced (quarries never work in the port), so the sawmill
- * reservation never places, so the barracks is never wanted (KM_CityPredictor.pas 468: warfare > 0 needed).
+ * The frozen organic chain (docs/M5-SPIKE.md 7.7, M5e): the economy scenario with no military grants, 60000
+ * ticks. Stone and the sawmill are reached; the barracks is never wanted: the stone crisis (stone at 1 after
+ * tick ~12000) blocks every non-quarry placement, so the weapon workshop is never placed, so warfare stays 0
+ * (KM_CityPredictor.pas 468: warfare > 0 needed). Frozen as measured; the chain table is in 7.7.
  */
 export const EXPECTED_ORGANIC = {
   links: [
-    { link: 'quarry produces stone (stone-* events)', reached: false, tick: null, value: 0 },
-    { link: 'sawmill placed (house-wip type=0)', reached: false, tick: null, value: 0 },
+    { link: 'quarry produces stone (stone-* events)', reached: true, tick: 2923, value: 49 },
+    { link: 'sawmill placed (house-wip type=0)', reached: true, tick: 5573, value: 1 },
     { link: 'barracks wanted (predictor requires it)', reached: false, tick: null, value: 0 },
     { link: 'barracks placed (house-wip type=21)', reached: false, tick: null, value: 0 },
     { link: 'barracks built (house-activated type=21)', reached: false, tick: null, value: 0 },
@@ -30,7 +36,7 @@ export const EXPECTED_ORGANIC = {
     { link: 'soldiers equipped (barracks-equipped)', reached: false, tick: null, value: 0 },
     { link: 'army groups formed (military groups with members)', reached: false, tick: null, value: 0 },
   ] as { link: string; reached: boolean; tick: number | null; value: number }[],
-  sha256: 'c2fe7b1c5fdc15b49a6c23792fa6790053fce96abab9a40adfcd268d385b3eb8',
+  sha256: 'f36f6bb4e17a7e28416ee5d1471823e2bddfbe82c11bd05bd611a897c62e3adf',
 };
 
 /**
@@ -45,23 +51,23 @@ export const EXPECTED_ATTACK = {
     hand: 1,
     equipped: 12,
     recruitsTrained: 0,
-    warriors: 63,
-    requests: 1,
-    combatGroupsMax: 5,
-    groupsAddedToAttack: 5,
-    combatGroupsEnd: 5,
+    warriors: 59,
+    requests: 2,
+    combatGroupsMax: 6,
+    groupsAddedToAttack: 6,
+    combatGroupsEnd: 6,
     killsByHand: 9,
-    killsByEnemy: 3,
-    lossesByEnemy: 3,
+    killsByEnemy: 7,
+    lossesByEnemy: 7,
     houseDamage: 550,
     houseDestroyedEvents: 1,
     enemyHousesStart: 3,
     enemyHousesEnd: 2,
     enemyWarriorsStart: 18,
     enemyWarriorsEnd: 12,
-    rngState: 785051773,
+    rngState: 1045738567,
   } as Record<string, unknown>,
-  sha256: 'd1825fa9985e904f3ac9c1281b5095a75f33b586518d7d18dcda4e6221cb7c59',
+  sha256: '72bf668e788778d07c65a1814e8213806175df3049886242cf1704f398eae172',
 };
 
 /**
@@ -89,48 +95,52 @@ export const EXPECTED = {
   },
   events: {
     'build-area-assigned': 8,
-    'build-house-assigned': 112,
-    'build-road-assigned': 69,
-    'build-supply': 37,
-    'chop-plan': 5,
-    'delivery-assigned': 172,
-    'house-activated': 5,
+    'build-house-assigned': 79,
+    'build-road-assigned': 168,
+    'build-supply': 38,
+    'chop-plan': 12,
+    'delivery-assigned': 313,
+    'house-activated': 6,
     'house-plan-digged': 8,
-    'house-terrain-built': 5,
+    'house-terrain-built': 6,
     'house-wip': 8,
-    'road-built': 77,
-    'road-digged': 69,
-    'school-unit-created': 41,
-    'school-unit-trained': 41,
-    'tree-fell': 5,
-    'trunk-out': 5,
-    'ware-delivered': 172,
-    'worker-assigned': 4,
+    'road-built': 154,
+    'road-digged': 168,
+    'school-unit-created': 47,
+    'school-unit-trained': 47,
+    'stone-out': 24,
+    'stone-plan': 25,
+    'timber-out': 12,
+    'tree-fell': 12,
+    'trunk-out': 12,
+    'trunk-taken': 12,
+    'ware-delivered': 313,
+    'worker-assigned': 6,
   } as Record<string, number>,
   final: {
-    plannedByType: { house0: 1, house9: 1, house11: 1, house13: 1, house14: 5, house27: 1 },
-    plannedPlaced: 9,
-    plannedReserved: 1,
-    builtByType: { house11: 1, house13: 1, house14: 5, house9: 1, house27: 1 },
-    completedHouses: 6,
-    wipHouses: 3,
-    roadTiles: 157,
+    plannedByType: { house0: 1, house3: 1, house9: 2, house11: 1, house13: 1, house14: 5, house15: 1 },
+    plannedPlaced: 10,
+    plannedReserved: 2,
+    builtByType: { house11: 1, house13: 1, house14: 4, house9: 2, house0: 1 },
+    completedHouses: 7,
+    wipHouses: 2,
+    roadTiles: 234,
     cornFields: 0,
     fieldBuiltEvents: 0,
-    roadBuiltEvents: 77,
+    roadBuiltEvents: 154,
     housePlansDigged: 8,
-    housesActivated: 5,
-    unitsByType: { unit0: 23, unit9: 22, unit10: 3, unit1: 3 },
-    trainedUnits: 41,
+    housesActivated: 6,
+    unitsByType: { unit0: 26, unit9: 22, unit10: 3, unit1: 3, unit5: 3 },
+    trainedUnits: 47,
     schoolQueued: 0,
     workers: 22,
-    serfs: 23,
+    serfs: 26,
     builders: 22,
-    wares: { trunk: 5, stone: 5, timber: 29, goldOre: 30, coal: 30, gold: 29, wine: 30, bread: 40, sausage: 20, fish: 10 },
+    wares: { timber: 52, goldOre: 30, coal: 30, gold: 23, wine: 30, bread: 40, sausage: 20, fish: 10 },
     workerCount: 21,
     requiredSchool: 2,
     cityCompleted: false,
-    rngState: 2032645329,
+    rngState: 1831796386,
   },
-  sha256: '1a425dcd44f3672a9d5b5059f0f8ca8b4f2ee4c15130d81737b013a63eb2fe0e',
+  sha256: 'fae374de6d24d7771325c38155cf5f3d4593934ea8f6632d11fcb225873960e7',
 };
