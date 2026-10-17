@@ -1,4 +1,5 @@
-// mission.ts — parser for KaM mission scripts (`*.dat`), the v0 subset (docs/M3-SPIKE.md 2.1).
+// mission.ts — parser for KaM mission scripts (`*.dat`), the v0 subset (docs/M3-SPIKE.md 2.1) and
+// the map-list info commands (docs/M3B-SPIKE.md 2.5, KM_MissionScript_Info.pas 37-95).
 //
 // Source of truth: mission/KM_MissionScript.pas (r15472, read-only reference).
 //  - Decode (ReadMissionFile 196–250): count bytes in [tab, CR, LF, '0'..'9', space, '!']; when
@@ -26,6 +27,15 @@
 //  - ADD_WARE (479) → qty = clamp(amount, −1, 65535), −1 → 65535, for the current hand. The target
 //    house (the hand's first store) is resolved by the world build, not here.
 //  - SET_FIELD (459) and everything else: skipped.
+//
+// MissionInfo (parseMissionInfo, additive — docs/M3B-SPIKE.md 3): the map list's commands.
+//  - SET_MAX_PLAYER → maxPlayers; SET_TACTIC → tactic (fighting mode, KM_MissionScript_Info.pas 72).
+//  - SET_CURR_PLAYER → the current hand; SET_HUMAN_PLAYER → humanPlayer + canBeHuman[hand].
+//  - SET_USER_PLAYER / SET_AI_PLAYER / SET_ADVANCED_AI_PLAYER → the capability flags; a −1
+//    parameter (missing) means the current hand (KM_MissionScript_Info.pas 82-95).
+//  - SET_AI_START_POSITION x y → aiStart[hand] = (x+1, y+1) with the PointInMap check
+//    (KM_MissionScript_Standard.pas 697-698; the info parser itself does not read this command);
+//    the default for every hand is (1,1) (KM_AISetup.pas 80).
 //
 // Throws on malformed input (empty script, no '!' at all is fine — an empty Mission is returned).
 //
@@ -67,6 +77,17 @@ export interface Mission {
   wares: MissionWare[];
 }
 
+/** The map-list metadata (docs/M3B-SPIKE.md 3), from the same decode + tokenizer. */
+export interface MissionInfo {
+  maxPlayers: number;
+  humanPlayer: number;
+  canBeHuman: boolean[];  // indexed by hand 0..MAX_HANDS-1
+  classicAI: boolean[];
+  advancedAI: boolean[];
+  aiStart: { x: number; y: number }[]; // indexed by hand; (1,1) unless SET_AI_START_POSITION says otherwise
+  tactic: boolean;        // !SET_TACTIC present (fighting mode)
+}
+
 // HOUSE_ID_TO_TYPE (KM_ResHouses.pas 193–199): script id → TKMHouseType id. Kept here (and used by
 // the economy world for the script-id semantics of the tutorial's houses).
 export const HOUSE_ID_TO_TYPE: number[] = [
@@ -85,20 +106,26 @@ export const UNIT_OLD_ID_TO_RECORD: number[] = [
 /** HAND_ANIMAL / HAND_NONE (KM_HandTypes): −1 — animals keep this owner and are not spawned in v0. */
 export const HAND_ANIMAL = -1;
 
-const MAX_HANDS = 27; // KM_Defaults.pas 309
+export const MAX_HANDS = 27; // KM_Defaults.pas 309
 const MAX_CMD = 6; // TokenizeScript(fileText, 6, []) (KM_MissionScript_Standard.pas 140)
 const HAND_NONE = -1;
+
+/** The XOR-239 heuristic of ReadMissionFile (212–222): the share of common bytes is < 0.20. */
+export function missionScriptIsXor239(bytes: Uint8Array): boolean {
+  if (bytes.length === 0) return false;
+  let common = 0;
+  for (const b of bytes) {
+    if (b === 9 || b === 10 || b === 13 || b === 0x20 || b === 0x21 || (b >= 0x30 && b <= 0x39)) common += 1;
+  }
+  return common / bytes.length < 0.2;
+}
 
 /** The decoded script text (XOR-239 detection + space collapsing), exposed for tests/tools. */
 export function decodeMissionScript(bytes: Uint8Array): string {
   if (bytes.length === 0) throw new Error('mission: script is empty');
 
   const buf = Uint8Array.from(bytes);
-  let common = 0;
-  for (const b of buf) {
-    if (b === 9 || b === 10 || b === 13 || b === 0x20 || b === 0x21 || (b >= 0x30 && b <= 0x39)) common += 1;
-  }
-  if (common / buf.length < 0.2) {
+  if (missionScriptIsXor239(buf)) {
     for (let i = 0; i < buf.length; i++) buf[i] ^= 239; // XOR-239 (212–222)
   }
   for (let i = 0; i < buf.length; i++) {
@@ -268,4 +295,81 @@ export function parseMissionScript(bytes: Uint8Array, mapX = 0, mapY = 0): Missi
   }
 
   return mission;
+}
+
+/**
+ * Parse one mission script (`*.dat`) into the map-list MissionInfo (docs/M3B-SPIKE.md 2.5/3).
+ * Reuses decodeMissionScript + tokenizeMissionScript; throws on malformed input (empty script).
+ * `mapX`/`mapY` (optional) are the map size for the SET_AI_START_POSITION PointInMap check —
+ * pass 0/omit when unknown, exactly like parseMissionScript.
+ */
+export function parseMissionInfo(bytes: Uint8Array, mapX = 0, mapY = 0): MissionInfo {
+  const text = decodeMissionScript(bytes);
+  const commands = tokenizeMissionScript(text);
+  const hasMap = mapX > 0 && mapY > 0;
+  const inMap = (x: number, y: number): boolean => !hasMap || pointInMap(x, y, mapX, mapY);
+
+  const info: MissionInfo = {
+    maxPlayers: 0,
+    humanPlayer: 0,
+    canBeHuman: new Array<boolean>(MAX_HANDS).fill(false),
+    classicAI: new Array<boolean>(MAX_HANDS).fill(false),
+    advancedAI: new Array<boolean>(MAX_HANDS).fill(false),
+    aiStart: Array.from({ length: MAX_HANDS }, () => ({ x: 1, y: 1 })), // KM_AISetup.pas 80
+    tactic: false,
+  };
+
+  let hand: number = HAND_NONE;
+  const inRange = (h: number): boolean => h >= 0 && h < MAX_HANDS;
+
+  for (const { cmd, params: p } of commands) {
+    switch (cmd) {
+      case '!SET_MAX_PLAYER':
+        info.maxPlayers = Math.max(0, p[0]);
+        break;
+      case '!SET_TACTIC':
+        info.tactic = true;
+        break;
+      case '!SET_CURR_PLAYER':
+        hand = inRange(p[0]) ? p[0] : HAND_NONE;
+        break;
+      case '!SET_HUMAN_PLAYER':
+        // DefaultHuman + CanBeHuman[P[0]] (KM_MissionScript_Info.pas 76-80).
+        if (inRange(p[0])) {
+          info.humanPlayer = p[0];
+          info.canBeHuman[p[0]] = true;
+        }
+        break;
+      case '!SET_USER_PLAYER':
+        if (p[0] === -1) {
+          if (inRange(hand)) info.canBeHuman[hand] = true;
+        } else if (inRange(p[0])) {
+          info.canBeHuman[p[0]] = true;
+        }
+        break;
+      case '!SET_AI_PLAYER':
+        if (p[0] === -1) {
+          if (inRange(hand)) info.classicAI[hand] = true;
+        } else if (inRange(p[0])) {
+          info.classicAI[p[0]] = true;
+        }
+        break;
+      case '!SET_ADVANCED_AI_PLAYER':
+        if (p[0] === -1) {
+          if (inRange(hand)) info.advancedAI[hand] = true;
+        } else if (inRange(p[0])) {
+          info.advancedAI[p[0]] = true;
+        }
+        break;
+      case '!SET_AI_START_POSITION':
+        // KM_MissionScript_Standard.pas 697: (x+1, y+1) when it is inside the map; the info
+        // parser does not read this command, the standard mission parser does.
+        if (inRange(hand) && inMap(p[0] + 1, p[1] + 1)) info.aiStart[hand] = { x: p[0] + 1, y: p[1] + 1 };
+        break;
+      default:
+        break; // everything else is walked over by the tokenizer and skipped
+    }
+  }
+
+  return info;
 }

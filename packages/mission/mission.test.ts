@@ -4,6 +4,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   decodeMissionScript,
+  missionScriptIsXor239,
+  parseMissionInfo,
   parseMissionScript,
   tokenizeMissionScript,
   HAND_ANIMAL,
@@ -145,4 +147,100 @@ test('an empty script throws; a script without commands parses to an empty missi
   assert.equal(m.maxPlayers, 0);
   assert.equal(m.humanPlayer, 0);
   assert.equal(m.mapName, '');
+});
+
+// ---- parseMissionInfo (docs/M3B-SPIKE.md 2.5/3) ----
+
+/** The hands that are on in a boolean[] (the JSON shape the map list prints). */
+function on(values: boolean[]): number[] {
+  return values.map((v, i) => (v ? i : -1)).filter((i) => i >= 0);
+}
+
+// A realistic script: the XOR-239 heuristic false-positives on very short scripts (few digits).
+const INFO_SCRIPT =
+  '!SET_MAP "maps\\info.map" !SET_MAX_PLAYER 4 !SET_TACTIC !SET_CURR_PLAYER 0 !SET_HUMAN_PLAYER 0 ' +
+  '!SET_USER_PLAYER -1 !SET_AI_PLAYER 1 !SET_ADVANCED_AI_PLAYER -1 !SET_AI_START_POSITION 5 6 ' +
+  '!SET_CURR_PLAYER 2 !SET_USER_PLAYER 2 !SET_AI_PLAYER -1 !SET_HOUSE 11 15 16 !SET_UNIT 0 20 21 !ADD_WARE 2 -1';
+
+/** Pad a command fragment with realistic coordinates, so the XOR-239 heuristic sees a plain file. */
+function script(text: string): Uint8Array {
+  return latin1(
+    `${text} !SET_HOUSE 11 15 16 !SET_HOUSE 0 17 18 !SET_HOUSE 9 4 119 !SET_UNIT 0 20 21 !SET_UNIT 14 22 23 ` +
+      '!SET_STREET 13 16 !SET_STREET 14 16 !ADD_WARE 2 -1 !ADD_WARE 0 30 !ADD_WARE 1 9000',
+  );
+}
+
+test('parseMissionInfo: players, tactic and the capability arrays', () => {
+  const info = parseMissionInfo(latin1(INFO_SCRIPT));
+  assert.equal(info.maxPlayers, 4);
+  assert.equal(info.humanPlayer, 0);
+  assert.equal(info.tactic, true);
+  // hand 0: human + user −1; hand 1: SET_AI_PLAYER 1; hand 2: SET_USER_PLAYER 2 + ai −1.
+  assert.deepEqual(on(info.canBeHuman), [0, 2]);
+  assert.deepEqual(on(info.classicAI), [1, 2]);
+  assert.deepEqual(on(info.advancedAI), [0]); // SET_ADVANCED_AI_PLAYER −1 under hand 0
+});
+
+test('parseMissionInfo defaults: no commands → zeros, all flags off, (1,1) starts, no tactic', () => {
+  const info = parseMissionInfo(script('!SET_MAP "maps\\empty.map" !SET_CURR_PLAYER 0'));
+  assert.equal(info.maxPlayers, 0);
+  assert.equal(info.humanPlayer, 0);
+  assert.equal(info.tactic, false);
+  assert.equal(info.canBeHuman.length, 27);
+  assert.deepEqual(on(info.canBeHuman), []);
+  assert.deepEqual(on(info.classicAI), []);
+  assert.deepEqual(on(info.advancedAI), []);
+  assert.equal(info.aiStart.length, 27);
+  assert.deepEqual(info.aiStart[0], { x: 1, y: 1 }); // KM_AISetup.pas 80
+  assert.deepEqual(info.aiStart[26], { x: 1, y: 1 });
+});
+
+test('parseMissionInfo: SET_AI_START_POSITION stores (x+1, y+1), all-zero stores (1,1)', () => {
+  const info = parseMissionInfo(script('!SET_CURR_PLAYER 1 !SET_AI_START_POSITION 5 6 !SET_AI_START_POSITION 0 0'));
+  assert.deepEqual(info.aiStart[1], { x: 1, y: 1 }); // the last command wins, (0,0) → (1,1)
+  assert.deepEqual(info.aiStart[0], { x: 1, y: 1 });
+
+  const one = parseMissionInfo(script('!SET_CURR_PLAYER 1 !SET_AI_START_POSITION 5 6'));
+  assert.deepEqual(one.aiStart[1], { x: 6, y: 7 });
+
+  // Before any SET_CURR_PLAYER the command is skipped (hand = HAND_NONE).
+  const noHand = parseMissionInfo(script('!SET_AI_START_POSITION 5 6 !SET_CURR_PLAYER 0'));
+  assert.deepEqual(noHand.aiStart[0], { x: 1, y: 1 });
+});
+
+test('parseMissionInfo: the map size gates SET_AI_START_POSITION (PointInMap)', () => {
+  const text = script('!SET_CURR_PLAYER 3 !SET_AI_START_POSITION 5 6');
+  assert.deepEqual(parseMissionInfo(text, 8, 8).aiStart[3], { x: 6, y: 7 });
+  assert.deepEqual(parseMissionInfo(text, 5, 6).aiStart[3], { x: 1, y: 1 }); // 6,7 is outside 5x6
+  assert.deepEqual(parseMissionInfo(text).aiStart[3], { x: 6, y: 7 }); // unknown size: accepted
+});
+
+test('parseMissionInfo: XOR-239 scripts give the same info as plain ones', () => {
+  const plain = parseMissionInfo(latin1(INFO_SCRIPT));
+  const encoded = parseMissionInfo(xor239(latin1(INFO_SCRIPT)));
+  assert.deepEqual(encoded, plain);
+});
+
+test('parseMissionInfo: missing parameters (default −1) never crash and never enable a hand', () => {
+  const info = parseMissionInfo(
+    script('!SET_MAX_PLAYER !SET_HUMAN_PLAYER !SET_USER_PLAYER !SET_AI_PLAYER !SET_ADVANCED_AI_PLAYER !SET_AI_START_POSITION'),
+  );
+  assert.equal(info.maxPlayers, 0);
+  assert.equal(info.humanPlayer, 0);
+  assert.deepEqual(on(info.canBeHuman), []);
+  assert.deepEqual(on(info.classicAI), []);
+  assert.deepEqual(on(info.advancedAI), []);
+  assert.deepEqual(info.aiStart[0], { x: 1, y: 1 });
+
+  // −1 = the current hand, which is only known after SET_CURR_PLAYER.
+  const withHand = parseMissionInfo(script('!SET_CURR_PLAYER 7 !SET_USER_PLAYER -1 !SET_AI_PLAYER -1 !SET_ADVANCED_AI_PLAYER -1'));
+  assert.deepEqual(on(withHand.canBeHuman), [7]);
+  assert.deepEqual(on(withHand.classicAI), [7]);
+  assert.deepEqual(on(withHand.advancedAI), [7]);
+});
+
+test('missionScriptIsXor239: the ReadMissionFile heuristic on plain and encoded bytes', () => {
+  assert.equal(missionScriptIsXor239(latin1(INFO_SCRIPT)), false);
+  assert.equal(missionScriptIsXor239(xor239(latin1(INFO_SCRIPT))), true);
+  assert.equal(missionScriptIsXor239(new Uint8Array(0)), false);
 });

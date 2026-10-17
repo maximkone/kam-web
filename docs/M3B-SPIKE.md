@@ -210,4 +210,28 @@ flags (`SetCoop`, `PlayableAsSP`, …) — line-oriented, UTF-8 with ANSI fallba
 
 ## 7. Acceptance record
 
-(filled by the lead at acceptance)
+### 7.1 Worker G — any-map loading: accepted
+
+- `node tools/mapscan/cli.ts --check` → `MAPSCAN CHECK PASS (243 maps, 0 anomalies)` (exit 0):
+  `maps=243 kinds(Maps=35 MapsMP=208) formats(remake=232 standard=11) dat(plain=232 xor239=11)`;
+  `walk(ok=243 anomalies=0) chunk(ok=243/243) overlay(maps=28 tiles=6125 max=3627) layers(max=3
+  tiles=29340)`; `terrain(words>255=49123 max=596; tiles[] keeps the low byte, baseTerrain the full
+  Word)`; the 9 skirmish candidates match §2.6 exactly.
+- Lead's independent walker (`%TEMP%\opencode\kamweb_m3b_leadwalk.mjs`, own implementation of the
+  header + record rules): 243/232/11, 0 walk anomalies, overlay 28 maps / 6125 tiles, layered 29340 /
+  max 3, 49,123 word-terrain tiles — identical totals; the 11 standard + 11 XOR `.dat` lists
+  identical; per-map extremes match (K&M Tower Defense 3627 overlays, Center Castle Looting 264 +
+  8747 layered, Omlott Falak 10075 layered, Center Trees 265 + 8297, The Flaming North 288). Digest
+  `845fc9f0…baec` (lead's format). Note: the lead's walker prints 11 `chunkBad` for the standard
+  maps because it does not skip the resource block — a script limitation, not a data finding (the
+  parser and mapscan check them correctly).
+- Tutorial regressions unchanged: `WALK CHECK PASS`, `ECON CHECK PASS` (sha `6d780b62…`),
+  `MAP CHECK PASS`, the M2b grid sha `556bfcb1…ad3c1` YES; `npm test` **82/82** (G's 13 new tests
+  wired into `package.json` by the lead); `npx tsc --noEmit` exit 0.
+- Accepted deviations (G's flags): the §3 additions are optional in the type (7 pre-existing `KaMap`
+  literals would break otherwise); **`baseTerrain: Uint16Array` added** because Remake maps use
+  terrain ids > 255 (49,123 tiles — the low byte alone would flip walkability on 22,897 tiles);
+  `aiStart` follows the standard mission parser (`+1`, `PointInMap`, default (1,1)); `layerBytes` =
+  packed raw payloads in tile order; `LayersCnt > 3` throws; `maplist.ts` uses `node:fs`
+  (server-side only — the browser viewer keeps its own reader; consolidating the browser-safe core
+  out of `map.ts` is a follow-up refactor).
