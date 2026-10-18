@@ -9,6 +9,9 @@
 // global best bid (KM_HandLogistics.pas 551–577, 2356–2367) and the store-offer penalty (1587–1590) move them.
 // Worker H3 re-froze all three (docs/M5-SPIKE.md 7.9): the bid's random and construction terms (1554, 1576–1585,
 // 1614–1637) restore the corn fields and the inn in the economy run.
+// The lead re-froze the attack run (docs/M5-SPIKE.md 7.10, 2026-10-18): the warrior food demand draws
+// KaMRandom (KM_HandLogistics.pas 1639–1647), so the attack sha moves to afc512cd… and rngState to 702198609
+// while every counter stays identical; a control run with TROOPS_FEED_MAX 0 reproduces the old 6ab42294….
 // Two consecutive runs of the check print
 // identical numbers and sha256s (both phases).
 export const TICKS = 30000;
@@ -67,9 +70,9 @@ export const EXPECTED_ATTACK = {
     enemyHousesEnd: 2,
     enemyWarriorsStart: 18,
     enemyWarriorsEnd: 12,
-    rngState: 2104583360,
+    rngState: 702198609,
   } as Record<string, unknown>,
-  sha256: '6ab42294a75f6ea3e92e54968099af07ce20bdbe67cf943c3858fe5834d654f2',
+  sha256: 'afc512cd5dc5b8885c3f769ad2747cf2f7383f986a641882339239328416076b',
 };
 
 /**

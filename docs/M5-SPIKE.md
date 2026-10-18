@@ -610,3 +610,40 @@ Attack phase (12000 ticks, `node tools/aisim/cli.ts --check`): passes, sha `6ab4
 - `node tools/combatsim/cli.ts --check` -> `COMBAT CHECK PASS (900 ticks, 69 events, 277 ms)`, sha `09a19821...` (unchanged).
 - `node --test packages/sim/*.test.ts` -> `ℹ tests 131` / `ℹ pass 131` / `ℹ fail 0` (final tree; the count includes H2b's new `startplace.test.ts`).
 - `npx tsc --noEmit` -> no output (clean, the whole tree, this run).
+
+## 7.10 The AI economy gaps of 7.9 closed (2026-10-18)
+
+The four items 7.9 listed as "not ported" are ported (a worker on `opencode/deepseek-v4.1-flash-free`,
+re-run here by the lead). Each line names the Pascal it follows:
+
+- **Weapons bid branch** (`KM_HandLogistics.pas 1513-1529`): a done house that `DoesOrders` (`KM_ResHouses.pas
+  605-608`) or an iron smithy, with `offer.count <= 2` and `wareInCount <= 1`, bids `5 + (5-distr)*4 +
+  KaMRandom(16-3*distr)` and skips the route check (`tpWalkRoad`, as the Pascal marks it valid without one).
+- **Town-hall gold** (`KM_HandLogistics.pas 1620-1628`): a town-hall demand takes `+5000` when it already
+  holds more than 500 of the offered ware, else `+2`.
+- **Warrior food** (`KM_UnitWarrior.pas 290-297`, `KM_HandLogistics.pas 1639-1647`, `1179-1185`,
+  `KM_ArmyManagement.pas 304-313`): a group below `TROOPS_FEED_MAX` (`KM_Defaults.pas 373` = 0.55) orders
+  `wtFood` for its hungry members (`WT_FOOD = 30`; the ware enum is 0-based here, so `wtFood` = index-1, and
+  `WARES_FOOD = [wtWine, wtBread, wtSausage, wtFish]` as in `KM_ResTypes.pas`); a delivered food restores the
+  warrior to full condition. The order runs before the peacetime skip, as in `CheckGroupsState`.
+- **Wine field** (`KM_UnitTaskBuild.pas 363-435`): `TKMTaskBuildWine` with its `diHigh4` timber demand
+  (line 388), the dig/stay phases and the phase-5 timber wait; a delivery waits for phase < 5
+  (`KM_UnitTaskDelivery.pas 504-505`), and the field overlay is `SetField(ftWine)`.
+- **Farm/forest placement** (`KM_CityPlanner.pas 1747`, `1765`, `2437`; `KM_AIInfluences.pas 575-592`): the
+  ally term and the forest bid use `getBestAllianceOwnership(owner, x, y, 'ally')` instead of the owner's own
+  ownership, and that function now honours its `alliance` argument. Behaviour-inert while every other hand is
+  an enemy to `allianceOf`, which is v0's rule today.
+
+**One gate moved, by the RNG stream only:** the attack run is `6ab42294...` -> `afc512cd...`
+(`rngState` 2104583360 -> 702198609). Every observable counter is identical (`killsByHand` 9,
+`killsByEnemy` 6, `houseDamage` 550, `houseDestroyedEvents` 1, `enemyHouses` 3 -> 2, `enemyWarriors`
+18 -> 12, `equipped` 12); the food demands consume `KaMRandom` draws, so the stream after them differs. A
+control run with `TROOPS_FEED_MAX` set to 0 restores `6ab42294...` exactly (the worker's measurement): the
+other four changes move no gate.
+
+**Unchanged gates (this run):** economy `8d7bf8e7...`, organic `62a4cbd2...`, `econsim` `fd51da4a...`,
+`buildsim` `5d17abc1...`, `prodsim` `ed2e07fe...`, `skirmish` `3bdddedb...`, `aistart` `b97ee3bf...`,
+`combatsim` `09a19821...`, mapscan 243 maps / 0 anomalies, `npm test` 210/210, `npx tsc --noEmit` clean.
+
+**Open:** the new logic has no unit test of its own; `node tools/aisim/cli.ts --check` is its acceptance run
+(it exercises the bid, the food demand, the delivery and the wine task end to end).

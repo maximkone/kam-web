@@ -15,7 +15,8 @@
 //  - No split: v0 combat has no OrderSplitUnit/OrderSplitLinkTo, so linking moves whole members (as many as
 //    fit) and a group is placed whole at a defence position.
 //  - Ranged groups do not reposition in formation (MoveRangedInFormation is skipped): they attack as melee.
-//  - Food: no OrderFood (v0 has no soldier food logistics); FoodProblems is always false.
+//  - Food: OrderFood is modelled (hungry warriors get a wtFood demand; see checkGroupsState),
+//    but CheckFoodProblems (the famine veto) is not: FoodProblems stays false.
 //  - Equip: economy.barracksEquip takes the wares from the hand's stock; the warrior stands at the door at
 //    once and WarriorEquipped runs in the same call (the Pascal waits for WarriorWalkedOut).
 //  - Targets: a combat group without a target takes the nearest house of the attack request's enemies, in
@@ -35,6 +36,7 @@ import type { GroupState, CombatUnit } from './combat.ts';
 import {
   addGroupMember,
   groupCanTakePlayerOrders,
+  groupCondition,
   groupFightMaxRange,
   groupIsDead,
   groupIsIdleToAI,
@@ -42,6 +44,7 @@ import {
   groupMembers,
   isDeadOrDying,
   GT_MELEE,
+  UNIT_MIN_CONDITION,
 } from './combat.ts';
 import type { AiPlayer, AiSetup, Pt, ScriptAttack, ArmySlot } from './ai.ts';
 import {
@@ -759,11 +762,24 @@ export class ArmyManagement implements ArmySlot {
     }
   }
 
-  /** CheckGroupsState (291–330): feed the idle groups into the attack or a defence position. */
+  /** CheckGroupsState (291–330): feed hungry groups, then put the idle groups into the attack or a
+   *  defence position. */
   private checkGroupsState(tick: number): void {
     const w = this.world;
     for (const g of w.groupList().slice()) {
       if (g.owner !== this.owner || groupIsDead(g) || !groupCanTakePlayerOrders(w, g)) continue;
+      // Check hunger and order food (KM_ArmyManagement.pas 306–309) — before the peacetime skip.
+      if (groupCondition(w, g) < UNIT_MIN_CONDITION && !this.foodProblems) {
+        // Cheat for the autobuild AI: only feed hungry group members (OrderFood(True, AutoBuild)).
+        for (const uid of g.memberUids) {
+          const u = w.unitByUid(uid);
+          if (u === null || u.dead) continue;
+          const ws = w.warriorState(u);
+          if (ws === null) continue;
+          if (this.ai.setup.autoBuild && ws.condition > UNIT_MIN_CONDITION) continue;
+          w.orderWarriorFood(uid);
+        }
+      }
       if (this.isPeaceTime(tick)) continue;
       if (this.attack.isGroupInAction(g.uid)) continue;
       if (this.defence.findPositionOf(g.uid) >= 0) continue;

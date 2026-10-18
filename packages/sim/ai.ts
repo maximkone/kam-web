@@ -825,11 +825,13 @@ export class Influences {
     return owner;
   }
 
-  /** GetBestAllianceOwnership (575–592) for atEnemy = the max ownership of the other hands. */
-  getBestAllianceOwnership(hand: number, x: number, y: number, _alliance: 'ally' | 'enemy'): number {
+  /** GetBestAllianceOwnership (575–592): the highest ownership among the hands whose alliance to
+   *  `hand` is unchanged by `alliance` (atAlly = the hands allied with it, atEnemy = its enemies). */
+  getBestAllianceOwnership(hand: number, x: number, y: number, alliance: 'ally' | 'enemy'): number {
     let result = 0;
     for (let h = 0; h < this.world.handCount; h++) {
       if (h === hand) continue;
+      if (this.world.allianceOf(hand, h) !== alliance) continue;
       const v = this.getOwnership(h, x, y);
       if (v > result) result = v;
     }
@@ -3434,7 +3436,7 @@ export class CityPlanner {
       const centerDist = -distanceAbs(cityCenter, loc) * AI_PAR.PLANNER_FindPlaceForHouse_CityCenter;
       const routes = this.eye.routes[this.index(loc.x, loc.y)] * AI_PAR.PLANNER_FindPlaceForHouse_Route;
       const flatArea = this.eye.flatArea[this.index(loc.x, loc.y)] * AI_PAR.PLANNER_FindPlaceForHouse_FlatArea;
-      const allyInf = -this.influences.getOwnership(this.owner, loc.x, loc.y) * PLANNER_ALLY_INFLUENCE;
+      const allyInf = -this.influences.getBestAllianceOwnership(this.owner, loc.x, loc.y, 'ally') * PLANNER_ALLY_INFLUENCE;
       const enemyInf = -this.influences.getBestAllianceOwnership(this.owner, loc.x, loc.y, 'enemy') * PLANNER_ENEMY_INFLUENCE;
       let gain: number;
       if (typeId === HT_FARM || typeId === HT_VINEYARD) {
@@ -3816,7 +3818,7 @@ export class CityPlanner {
       const flatArea = this.eye.flatArea[this.index(p.x, p.y)] * AI_PAR.PLANNER_FOREST_FindPlaceForWoodcutter_FlatArea;
       const soil = this.eye.soil[this.index(p.x, p.y)] * AI_PAR.PLANNER_FOREST_FindPlaceForWoodcutter_Soil;
       const freeTiles = getFreeTiles(p) * AI_PAR.PLANNER_FOREST_FindPlaceForWoodcutter_FreeTiles;
-      const allyInf = -this.influences.getOwnership(this.owner, p.x, p.y) * PLANNER_ALLY_INFLUENCE;
+      const allyInf = -this.influences.getBestAllianceOwnership(this.owner, p.x, p.y, 'ally') * PLANNER_ALLY_INFLUENCE;
       const enemyInfl = -this.influences.getBestAllianceOwnership(this.owner, p.x, p.y, 'enemy') * PLANNER_ENEMY_INFLUENCE;
       fi.forests[idx].bid = treeCnt + distCrit + existFrs + routes + flatArea + soil + freeTiles + allyInf + enemyInfl;
     };
@@ -4293,8 +4295,8 @@ export class CityBuilder {
           if (isPlan(p, 4, 'wine')) {
             node.requiredWorkers -= 1;
           } else if (!buildField(k, 'wine')) {
-            // v0: the wine task does not exist (docs/M5-SPIKE.md §1a), so the tree stays and the
-            // point is dropped — the plan is re-checked by the planner next time.
+            // A tree can be cleared by a wineyard plan; when the tile cannot take one, drop the point
+            // and let the planner re-check it next time.
             node.fieldList.splice(k, 1);
           }
         } else if (isCompletedWine(p) || isCompletedField(p) || isRoad(p)) {

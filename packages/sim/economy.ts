@@ -62,8 +62,9 @@
 //    KM_UnitTaskDelivery.pas 454–483 (phases 5/6/7 with the entrance diagonal rule); the 1.42
 //    parameter of SetActionWalkToSpot is a distance tolerance in the Pascal — the port walks to
 //    the exact tile (documented deviation).
-//  - Field plans: roads and corn fields are built (SetRoad/SetField); wine fields are out of v0
-//    (no TKMTaskBuildWine, spec §1a), so tileIsWineField always reads the (unused) wine overlay.
+//  - Field plans: roads, corn and wine fields are built (SetRoad/SetField, TKMTaskBuildWine). The
+//    Pascal's wine terrain stage (SetInitWine) and its blocking grape object are not modelled: the
+//    field overlay alone marks a completed wine field.
 //
 // Browser-safe: no node: imports.
 import type { KaMap } from '../map/map.ts';
@@ -258,7 +259,7 @@ export interface EconUnit {
   carry: number; // ware id, -1 = none
   inside: boolean;
   homeUid: number; // 0 = none
-  taskKind: 'none' | 'goHome' | 'chop' | 'saw' | 'deliver' | 'idle' | 'buildHouseArea' | 'buildHouse' | 'buildRoad' | 'buildField' | 'selfTrain' | 'stone' | 'smith' | 'workshop';
+  taskKind: 'none' | 'goHome' | 'chop' | 'saw' | 'deliver' | 'idle' | 'buildHouseArea' | 'buildHouse' | 'buildRoad' | 'buildField' | 'buildWine' | 'selfTrain' | 'stone' | 'smith' | 'workshop';
   // M4 (additive): unit combat (docs/M4-SPIKE.md §3)
   hitPoints: number;
   groupUid: number; // 0 = none
@@ -354,6 +355,19 @@ type Task =
       tileLockSet: boolean;
       closed: boolean;
     }
+  // TKMTaskBuildWine (docs/M5-SPIKE.md §7.9; KM_UnitTaskBuild.pas 363–435): the wine field task, its
+  // timber demand (diHigh4) and the wine overlay.
+  | {
+      kind: 'buildWine';
+      phase: number;
+      x: number;
+      y: number;
+      field: FieldPlan | null;
+      demandSet: boolean;
+      tileLockSet: boolean;
+      isDigged: boolean;
+      closed: boolean;
+    }
   // M5b (additive): TKMTaskSelfTrain (units/tasks/KM_UnitTaskSelfTrain.pas 70-118) — the school
   // training task of the unit being trained (5×29 stays + 9 idle ≈ 154 ticks, then walk out).
   | { kind: 'selfTrain'; phase: number; schoolUid: number };
@@ -377,7 +391,14 @@ interface Demand {
 const DI_NORM = 0;
 const DI_HIGH4 = 1;
 const DI_HIGH3 = 2;
+const DI_HIGH2 = 3;
 const DI_HIGH1 = 4;
+
+/** wtFood (KM_ResTypes.pas): the pseudo-ware a hungry warrior demands; any WARES_FOOD offer satisfies it
+ *  (ValidWareTypePair, KM_HandLogistics.pas 1179–1185). */
+const WT_FOOD = 30;
+/** WARES_FOOD (KM_ResWares.pas): the four wares a warrior's food demand accepts. */
+const WARES_FOOD: ReadonlySet<number> = new Set([WT_BREAD, WT_SAUSAGE, WT_WINE, WT_FISH]);
 
 /** AddDemand's importance override (KM_HandLogistics.pas 1160–1171): gold to a school is diHigh1, food to an inn diHigh3. */
 function houseDemandImportance(typeId: number, ware: number): number {
@@ -394,6 +415,23 @@ function wareDistribution(ware: number, typeId: number): number {
   if (ware === WT_CORN && typeId === HOUSE_TYPE_MILL) return 4;
   if (ware === WT_CORN && typeId === HOUSE_TYPE_STABLES) return 3;
   return 5;
+}
+
+/** DoesOrders (KM_ResHouses.pas 605–608 = NeedsPlayerOrder): the smiths and workshops the player (or AI)
+ *  gives production orders to. Used by the bid's weapons branch (KM_HandLogistics.pas 1517). */
+function doesOrders(typeId: number): boolean {
+  return (
+    typeId === HOUSE_TYPE_WEAPON_SMITHY ||
+    typeId === HOUSE_TYPE_ARMOR_SMITHY ||
+    typeId === HOUSE_TYPE_WEAPON_WORKSHOP ||
+    typeId === HOUSE_TYPE_ARMOR_WORKSHOP ||
+    typeId === 23 // htSiegeWorkshop (no port constant; only DoesOrders reads it)
+  );
+}
+
+/** ValidWareTypePair (KM_HandLogistics.pas 1179–1185): a food demand takes any food offer. */
+function waresMatch(offerWare: number, demandWare: number): boolean {
+  return demandWare === offerWare || (demandWare === WT_FOOD && WARES_FOOD.has(offerWare));
 }
 
 interface Offer {
@@ -453,6 +491,8 @@ const STORE_BID_PENALTY = 1000;
 const UNIT_RECRUIT = 13;
 /** TROOPS_TRAINED_CONDITION (KM_Defaults.pas 376): a barracks warrior starts at 0.6 of max condition. */
 const TROOPS_TRAINED_CONDITION = 0.6;
+/** TROOPS_FEED_MAX (KM_Defaults.pas 373): a troop below this share of its condition orders food. */
+const TROOPS_FEED_MAX = 0.55;
 /** M5e (additive, docs/M5-SPIKE.md 7.7): the production houses and workers (ai.ts HT_* / UT_*). */
 const HOUSE_TYPE_QUARRY = 14;
 const HOUSE_TYPE_WEAPON_WORKSHOP = 19;
@@ -618,6 +658,8 @@ export class EconomyWorld {
   private readonly offers: Offer[][] = []; // per hand
   private readonly demands: Demand[][] = []; // per hand
   private readonly unitStateMap = new Map<EconUnit, UnitState>();
+  /** fRequestedFood of the warriors (KM_UnitWarrior.pas 38, 290–297): cleared when a serf delivers food. */
+  private readonly foodRequested = new Set<number>(); // unit uids
   private readonly groupMap = new Map<number, GroupState>();
   private readonly houseStateMap = new Map<number, HouseState>(); // house uid → state (index-free)
   private readonly unitTile: Int32Array; // terrain IsUnit: uid per PositionNext tile (0 = none)
@@ -1483,6 +1525,8 @@ export class EconomyWorld {
         return this.runBuildRoad(u, st, task);
       case 'buildField':
         return this.runBuildField(u, st, task);
+      case 'buildWine':
+        return this.runBuildWine(u, st, task);
       case 'selfTrain':
         return this.runSelfTrain(u, st, task);
       default:
@@ -2268,13 +2312,21 @@ export class EconomyWorld {
           if (tst !== undefined && tst.task !== null) {
             const tt = tst.task;
             const waiting =
-              (tt.kind === 'buildRoad' && tt.phase < 4) || (tt.kind === 'buildField' && tt.phase < 3);
+              (tt.kind === 'buildWine' && tt.phase < 5) ||
+              (tt.kind === 'buildRoad' && tt.phase < 4) ||
+              (tt.kind === 'buildField' && tt.phase < 3);
             if (waiting) {
               this.setLockedStay(u, st, 5, false); // Wait until the worker finishes digging
               return 'continues'; // phase 6 again
             }
             tt.phase += 1; // fToUnit.Task.Phase := fToUnit.Task.Phase + 1
             this.setLockedStay(target, tst, 0, true); // SetActionLockedStay(0, uaWork1)
+          }
+          // A warrior eats the food and is fed to full condition (KM_UnitTaskDelivery.pas 514–519).
+          if (isWarriorSpec(this.unitSpecs[target.type])) {
+            const ws = this.warriorState(target);
+            if (ws !== null) ws.condition = Math.min(ws.condition + UNIT_MAX_CONDITION, UNIT_MAX_CONDITION);
+            this.foodRequested.delete(target.uid);
           }
           u.carry = -1;
           task.demand.being -= 1;
@@ -2627,7 +2679,11 @@ export class EconomyWorld {
     for (;;) {
       // Wares that still have an available demand — cheap pre-filter, so most passes do no BFS.
       const wanted = new Set<number>();
-      for (const d of demands) if (this.demandAvailable(d) > 0) wanted.add(d.ware);
+      for (const d of demands) {
+        if (this.demandAvailable(d) <= 0) continue;
+        if (d.ware === WT_FOOD) for (const w of WARES_FOOD) wanted.add(w); // ValidWareTypePair 1179–1185
+        else wanted.add(d.ware);
+      }
       if (wanted.size === 0) break;
 
       // One road BFS and one nearest-serf search per offer house per pass (cached).
@@ -2667,7 +2723,7 @@ export class EconomyWorld {
         const dist = distances(offerHouse);
         const offerIsStore = offerHouse.typeId === HOUSE_TYPE_STORE;
         for (const d of demands) {
-          if (d.ware !== offer.ware) continue;
+          if (!waresMatch(offer.ware, d.ware)) continue;
           const imp = d.importance ?? DI_NORM;
           if (win !== null && imp < win.imp) continue;
           if (d.houseUid === offer.houseUid && d.unitUid === 0) continue; // no same-house deliveries
@@ -2684,6 +2740,11 @@ export class EconomyWorld {
             const walk = findPath(this.grid, pointBelowEntrance(offerHouse), tp);
             if (walk === null) continue;
             cost = walk.length + this.drawN(10); // KaMRandom(10) (KM_HandLogistics.pas 1585)
+            // Food to a warrior: a random amount keeps the food types varied and prefers the abundant
+            // one (KM_HandLogistics.pas 1639–1647).
+            if (d.ware === WT_FOOD) {
+              cost += this.drawN(offer.count === 0 ? 5 + 150 : 5 + Math.floor(100 / offer.count));
+            }
           } else {
             const dHouse = this.houseByUid(d.houseUid);
             if (dHouse === null || dHouse.destroyed) continue;
@@ -2691,9 +2752,22 @@ export class EconomyWorld {
             // that is still being built accepts building materials from another store).
             if (offerIsStore && dHouse.typeId === HOUSE_TYPE_STORE && dHouse.buildState === 'done') continue;
             const target = pointBelowEntrance(dHouse);
-            const road = dist[this.index(target.x, target.y)];
-            if (road < 0) continue; // no road route
-            cost = road + this.drawN(16 - 3 * wareDistribution(d.ware, dHouse.typeId)); // KaMRandom(16 - 3*distr) (KM_HandLogistics.pas 1554)
+            const distr = wareDistribution(d.ware, dHouse.typeId);
+            // Weapons production with little iron: share it out evenly between the smiths instead of
+            // caring about the route length (KM_HandLogistics.pas 1516–1529). The Pascal sets the value
+            // without a route check and marks it valid (tpWalkRoad).
+            if (
+              dHouse.buildState === 'done' &&
+              (doesOrders(dHouse.typeId) || dHouse.typeId === HOUSE_TYPE_IRON_SMITHY) &&
+              offer.count <= 2 && // little resources to share around
+              this.wareInCount(dHouse, d.ware) <= 1 // few resources already delivered
+            ) {
+              cost = 5 + (5 - distr) * 4 + this.drawN(16 - 3 * distr);
+            } else {
+              const road = dist[this.index(target.x, target.y)];
+              if (road < 0) continue; // no road route
+              cost = road + this.drawN(16 - 3 * distr); // KaMRandom(16 - 3*distr) (KM_HandLogistics.pas 1554)
+            }
             if (dHouse.buildState !== 'done') {
               // Give priority to almost built houses, stone a little more (KM_HandLogistics.pas 1576–1579).
               cost -= 4 * C.buildResDeliveredPercent(dHouse);
@@ -2704,6 +2778,11 @@ export class EconomyWorld {
             // Prefer houses with fewer supplies, except store, barracks and town hall (KM_HandLogistics.pas 1614–1618).
             if (dHouse.typeId !== HOUSE_TYPE_STORE && dHouse.typeId !== HOUSE_TYPE_BARRACKS && dHouse.typeId !== HOUSE_TYPE_TOWN_HALL) {
               cost += 20 * this.wareInCount(dHouse, d.ware);
+            }
+            // Gold to a town hall: once it already holds more than 500 the delivery is very low
+            // priority, otherwise add a small value so it has no big advantage (KM_HandLogistics.pas 1620–1628).
+            if (dHouse.typeId === HOUSE_TYPE_TOWN_HALL) {
+              cost += this.wareInCount(dHouse, offer.ware) > 500 ? 5000 : 2;
             }
             // Always prefer House>House to House>Store (KM_HandLogistics.pas 1587–1590: the wtAll bid gets +1000).
             if (dHouse.typeId === HOUSE_TYPE_STORE) cost += STORE_BID_PENALTY;
@@ -3000,7 +3079,7 @@ export class EconomyWorld {
     return this.fieldOverlay[this.index(x, y)] === FIELD_CORN;
   }
 
-  /** TileIsWineField (no wine fields are built in v0; the overlay stays empty). */
+  /** TileIsWineField (KM_Terrain.pas 1679–1691): the field overlay marks the completed wine field. */
   tileHasWineField(x: number, y: number): boolean {
     if (!this.inMapCoords(x, y)) return false;
     return this.fieldOverlay[this.index(x, y)] === FIELD_WINE;
@@ -3332,6 +3411,21 @@ export class EconomyWorld {
     this.emit('field-built', `corn (${x},${y})`);
   }
 
+  /**
+   * SetField(aLoc, Owner, ftWine) (KM_Terrain.pas 3447–3477): the completed wine field. The Pascal's
+   * wine terrain stage (SetInitWine, :2422–2430) and the blocking grape object (obj 54) are not
+   * modelled — the overlay marks the field, and any tree it replaced is removed here (the Pascal's
+   * SetLand overwrites the object with the grape).
+   */
+  private setFieldWine(x: number, y: number, _owner: number): void {
+    if (!this.inMapCoords(x, y)) return;
+    const at = this.index(x, y);
+    this.removeObject(x, y);
+    this.fieldOverlay[at] = FIELD_WINE;
+    this.recomputeWalkAround(x, y);
+    this.emit('field-built', `wine (${x},${y})`);
+  }
+
   /** WareAddToBuild (KM_Houses.pas 1805–1817): timber/stone only, clamped to the costs. */
   wareAddToBuild(h: EconHouse, ware: number): void {
     if (h.destroyed) return;
@@ -3519,7 +3613,7 @@ export class EconomyWorld {
     }
   }
 
-  /** AssignFieldworks (:1273–1298). Wine field plans are not assigned (out of v0, spec §1a). */
+  /** AssignFieldworks (:1273–1298). All open field plans (road, corn, wine) get a builder task. */
   private assignFieldworks(hand: number, state: ConstructionState): void {
     if (this.idleBuilderCount(hand) === 0) return;
     const jobs = state.fields.filter((f) => f.status === 'open' && this.fieldHasTask(f)).length;
@@ -3542,12 +3636,12 @@ export class EconomyWorld {
     }
   }
 
-  /** v0: only road and corn field plans get a builder task (TKMTaskBuildWine is out, spec §1a). */
+  /** TKMFieldworksList.BestBid (:389–407) has no field-type filter: road, corn and wine fields. */
   private fieldHasTask(field: FieldPlan): boolean {
-    return field.fieldType === 'road' || field.fieldType === 'corn';
+    return field.fieldType === 'road' || field.fieldType === 'corn' || field.fieldType === 'wine';
   }
 
-  /** TKMFieldworksList.BestBid (:389–407) restricted to the v0 field types. */
+  /** TKMFieldworksList.BestBid (:389–407): the nearest open field the worker can walk to. */
   private bestBidField(hand: number, workerX: number, workerY: number): FieldPlan | null {
     const state = this.constructionState(hand);
     let best: FieldPlan | null = null;
@@ -3663,9 +3757,8 @@ export class EconomyWorld {
     this.emit('build-area-assigned', `unit#${u.uid} plan#${plan.uid} type=${plan.typeId}`);
   }
 
-  /** GiveTask (:471–476) → TKMUnitWorker.BuildField/BuildRoad (KM_Units.pas 970–979). */
+  /** GiveTask (:471–476) → TKMUnitWorker.BuildRoad/BuildField/BuildWine (KM_Units.pas 970–979). */
   private giveFieldTask(u: EconUnit, field: FieldPlan): void {
-    if (field.fieldType !== 'road' && field.fieldType !== 'corn') return; // wine is out of v0
     const st = this.unitStateMap.get(u);
     if (st === undefined) return;
     C.takeField(field, u.uid);
@@ -3682,6 +3775,19 @@ export class EconomyWorld {
         closed: false,
       };
       this.emit('build-road-assigned', `unit#${u.uid} (${field.x},${field.y})`);
+    } else if (field.fieldType === 'wine') {
+      st.task = {
+        kind: 'buildWine',
+        phase: 0,
+        x: field.x,
+        y: field.y,
+        field,
+        demandSet: false,
+        tileLockSet: false,
+        isDigged: false,
+        closed: false,
+      };
+      this.emit('build-wine-assigned', `unit#${u.uid} (${field.x},${field.y})`);
     } else {
       st.task = {
         kind: 'buildField',
@@ -3750,7 +3856,7 @@ export class EconomyWorld {
     const st = this.unitStateMap.get(u);
     if (st === undefined || st.task === null) return;
     const task = st.task;
-    if ((task.kind === 'buildRoad' || task.kind === 'buildField') && task.field === field) {
+    if ((task.kind === 'buildRoad' || task.kind === 'buildField' || task.kind === 'buildWine') && task.field === field) {
       st.task = null;
       this.finishTask(u, st, task);
     }
@@ -4093,6 +4199,82 @@ export class EconomyWorld {
     C.closeField(task.field);
   }
 
+  /** TKMTaskBuildWine (:363–435): the wine field task — dig, then demand one timber (diHigh4, dtOnce). */
+  private runBuildWine(u: EconUnit, st: UnitState, task: Task & { kind: 'buildWine' }): 'continues' | 'done' {
+    const at = this.index(task.x, task.y);
+    // WalkShouldAbandon (:349–353): the plan is still open and the tile can no longer take wine.
+    if (task.field !== null && task.field.status !== 'empty' && !this.tileGoodForField(task.x, task.y)) return 'done';
+    switch (task.phase) {
+      case 0: {
+        if (!this.walkTo(u, st, { x: task.x, y: task.y })) return 'done'; // (376)
+        task.phase = 1;
+        return 'continues';
+      }
+      case 1: {
+        this.tileLock[at] = TL_FIELD_WORK; // (381–382)
+        this.recomputeWalkAround(task.x, task.y);
+        task.tileLockSet = true;
+        this.cancelWinePlan(task); // CancelThePlan (:356–360)
+        this.addUnitDemand(u.owner, u, WT_TIMBER, 1); // AddDemand(nil, fUnit, wtTimber, 1, dtOnce, diHigh4) (:388)
+        task.demandSet = true;
+        this.setLockedStay(u, st, 12 * 4, true); // SetActionLockedStay(12*4, uaWork1, False) (:391)
+        task.phase = 2;
+        return 'continues';
+      }
+      case 2: {
+        this.incDigState(task.x, task.y); // (394)
+        this.setLockedStay(u, st, 24, true); // (395)
+        task.phase = 3;
+        return 'continues';
+      }
+      case 3: {
+        this.incDigState(task.x, task.y); // (398)
+        this.setLockedStay(u, st, 24, true); // (399)
+        task.phase = 4;
+        return 'continues';
+      }
+      case 4: {
+        this.resetDigState(task.x, task.y); // (402)
+        // SetInitWine (:403): the terrain becomes the wine terrain (not modelled).
+        this.setLockedStay(u, st, 30, false); // (404)
+        if (!task.isDigged) {
+          task.isDigged = true;
+          this.emit('wine-plan-digged', `(${task.x},${task.y})`); // ProcPlanWinefieldDigged (:408)
+        }
+        task.phase = 5;
+        return 'continues';
+      }
+      case 5: {
+        // (413–416): repeat until the serf brings the timber; the delivery moves the phase to 6.
+        this.setLockedStay(u, st, 30, false);
+        return 'continues';
+      }
+      case 6: {
+        task.demandSet = false; // (418)
+        this.setLockedStay(u, st, 11 * 8, true); // SetActionLockedStay(11*8, uaWork2, False) (:419)
+        task.phase = 7;
+        return 'continues';
+      }
+      case 7: {
+        this.setFieldWine(task.x, task.y, u.owner); // gTerrain.SetField(fLoc, Owner, ftWine) (423)
+        this.setUnlockedStay(u, st, 5); // SetActionStay(5, uaWalk) (424)
+        this.tileLock[at] = TL_NONE; // gTerrain.UnlockTile (425)
+        this.recomputeWalkAround(task.x, task.y);
+        task.tileLockSet = false;
+        task.phase = 8;
+        return 'continues';
+      }
+      default:
+        return 'done';
+    }
+  }
+
+  /** CancelThePlan of the wine task (:356–360): the plan can no longer be cancelled. */
+  private cancelWinePlan(task: Task & { kind: 'buildWine' }): void {
+    if (task.field === null) return;
+    C.closeField(task.field);
+  }
+
   /** IncDigState (KM_Terrain.pas 2433–2442): the toDig1..toDig4 overlay steps. */
   private incDigState(x: number, y: number): void {
     if (!this.inMapCoords(x, y)) return;
@@ -4158,6 +4340,33 @@ export class EconomyWorld {
     }
   }
 
+  /**
+   * TKMUnitWarrior.OrderFood (KM_UnitWarrior.pas 290–297): a warrior below TROOPS_FEED_MAX of its
+   * condition asks for one food ware (wtFood, dtOnce, diHigh2). fRequestedFood stays set until a serf
+   * delivers (KM_UnitTaskDelivery.pas 518). The AI calls this from CheckGroupsState (KM_ArmyManagement.pas 307–309).
+   */
+  orderWarriorFood(unitUid: number): void {
+    const u = this.unitByUid(unitUid);
+    if (u === null || u.dead) return;
+    if (!isWarriorSpec(this.unitSpecs[u.type])) return;
+    const ws = this.warriorState(u);
+    if (ws === null) return;
+    if (this.foodRequested.has(unitUid)) return;
+    if (ws.condition >= UNIT_MAX_CONDITION * TROOPS_FEED_MAX) return;
+    this.foodRequested.add(unitUid);
+    this.demands[u.owner].push({
+      houseUid: 0,
+      unitUid,
+      ware: WT_FOOD,
+      slot: -1,
+      script: true,
+      count: 1,
+      being: 0,
+      construction: false,
+      importance: DI_HIGH2,
+    });
+  }
+
   // ---- builder-task destructors (the Pascal's Destroy methods) --------------------------------
 
   /** The M5a task destructors: TKMTaskBuildHouseArea.Destroy (:608–644) and friends. */
@@ -4182,6 +4391,12 @@ export class EconomyWorld {
         if (!task.closed) {
           task.closed = true;
           this.finishFieldTask(u, task);
+        }
+        break;
+      case 'buildWine':
+        if (!task.closed) {
+          task.closed = true;
+          this.finishWineTask(u, task);
         }
         break;
       default:
@@ -4241,6 +4456,19 @@ export class EconomyWorld {
     if (task.field === null || task.field.status === 'empty') return;
     if (this.tileGoodForField(task.x, task.y)) C.reopenField(task.field);
     else C.closeField(task.field);
+  }
+
+  /** TKMTaskBuildWine.Destroy (:329–346): reopen/close the plan, drop the demand, unlock the tile. */
+  private finishWineTask(u: EconUnit, task: Task & { kind: 'buildWine' }): void {
+    if (task.field !== null && task.field.status !== 'empty') {
+      if (this.tileGoodForField(task.x, task.y)) C.reopenField(task.field);
+      else C.closeField(task.field);
+    }
+    if (task.demandSet) this.removeUnitDemands(u.uid);
+    if (task.tileLockSet) {
+      this.tileLock[this.index(task.x, task.y)] = TL_NONE;
+      this.recomputeWalkAround(task.x, task.y);
+    }
   }
 
   // =============================================================================================
