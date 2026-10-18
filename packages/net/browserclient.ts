@@ -12,6 +12,7 @@ import type { Skirmish, SkirmishDefines } from '../sim/skirmish.ts';
 import type { CommandInput } from './lockstep.ts';
 import type { Command } from '../sim/commands.ts';
 import type { GameStartMsg } from './protocol.ts';
+import type { AiStartLevel } from '../sim/aistart.ts';
 
 /** Opens the relay socket (the global WebSocket) and resolves once it is open. */
 export async function openRelay(url: string, hooks: GameHooks | null = null): Promise<NetClient> {
@@ -120,6 +121,13 @@ export interface MatchHooksOptions {
   files: () => MatchFiles;
   /** The Remake's peacetime option for the match (0 by default). Every client must use the same value. */
   peaceMinutes?: number;
+  /**
+   * The AI start handicap of an `ai` slot (the setup screen's option; `none` by default). Every client must use
+   * the same value. Without it a relay match hands the AI only what the map gives it, which on most maps is no
+   * army at all (docs/M5-SPIKE.md 7.6), so a host playing alone against an AI would face a much weaker opponent
+   * than the very same AI in a single-player skirmish.
+   */
+  aiStart?: AiStartLevel;
   /** The commands this client chooses for a set of tick `forTick` (the app's UI queue). Optional. */
   script?: (sk: Skirmish, forTick: number) => Command[];
   /** Runs after the skirmish of a game/start is built (the app attaches its renderer here). Optional. */
@@ -149,7 +157,7 @@ export function matchHooks(o: MatchHooksOptions): GameHooks {
           missionDat: f.missionDat,
           defines: f.defines,
           seed: start.seed,
-          slots: start.slots.map((s) => ({ hand: s.hand, kind: s.kind, aiLevel: s.aiLevel })),
+          slots: start.slots.map((s) => ({ hand: s.hand, kind: s.kind, aiLevel: s.aiLevel, aiStart: s.kind === 'ai' ? o.aiStart : undefined })),
           peaceMinutes: o.peaceMinutes ?? 0,
         });
       } catch (err) {

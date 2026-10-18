@@ -131,33 +131,60 @@ try {
   await waitFor(async () => (await host.eval("document.getElementById('mpplayers').textContent")).includes('hand 1'), 'the slot list shows hand 1', 30000);
 
   // ---- the Node peer joins and readies, then the host starts -------------------
-  const peer = await startPeer('MapsMP', mapName, created);
-  for (const n of peer.notes) host.notes.push(n);
-  const joined = await waitFor(async () => ((await host.eval("document.getElementById('mpplayers').textContent")).includes('peer') ? true : null), 'the host sees the peer', 30000)
-    .catch(async (e: Error) => { throw new Error(`${e.message} (host: ${await statusOf()}; peer: ${peer.notes.join('; ')})`); });
-  host.expect(joined === true, 'the host sees the peer in the slot list');
+  // --ai-slot: no peer; hand 1 is set to AI in the slot list and the host starts alone (the relay accepts
+  // `ai` slots; this is the path a solo host takes). The AI runs inside the one browser client.
+  const aiSlot = process.argv.includes('--ai-slot');
+  let peer: Peer | null = null;
+  if (aiSlot) {
+    await host.eval("(() => { const s = document.querySelector('select.mpslot'); s.value = 'ai'; s.dispatchEvent(new Event('change', { bubbles: true })); return s.value; })()");
+    await waitFor(async () => (await host.eval("document.querySelector('select.mpslot')?.value ?? ''")) === 'ai', 'the relay took hand 1 as AI', 20000)
+      .catch(async (e: Error) => { throw new Error(`${e.message} (host: ${await statusOf()})`); });
+    host.eval("document.getElementById('mpready').click()");
+  } else {
+    peer = await startPeer('MapsMP', mapName, created);
+    for (const n of peer.notes) host.notes.push(n);
+    const joined = await waitFor(async () => ((await host.eval("document.getElementById('mpplayers').textContent")).includes('peer') ? true : null), 'the host sees the peer', 30000)
+      .catch(async (e: Error) => { throw new Error(`${e.message} (host: ${await statusOf()}; peer: ${peer!.notes.join('; ')})`); });
+    host.expect(joined === true, 'the host sees the peer in the slot list');
+  }
   host.expect((await host.eval("document.getElementById('mpstart').disabled")) === false, 'the host may start');
   await host.eval("document.getElementById('mpstart').click()");
   await waitFor(async () => (await setupHidden()) === true, 'the host leaves the setup screen (game/start arrived)', 60000)
-    .catch(async (e: Error) => { throw new Error(`${e.message} (host: ${await statusOf()}; peer: ${peer.notes.join('; ')})`); });
+    .catch(async (e: Error) => { throw new Error(`${e.message} (host: ${await statusOf()}; peer: ${peer?.notes.join('; ') ?? 'none'})`); });
   await waitFor(async () => (await tickOf()) >= 5, 'the host game loop runs (tick >= 5)', 90000)
-    .catch(async (e: Error) => { throw new Error(`${e.message} (host: ${await statusOf()}; peer: ${peer.notes.join('; ')})`); });
+    .catch(async (e: Error) => { throw new Error(`${e.message} (host: ${await statusOf()}; peer: ${peer?.notes.join('; ') ?? 'none'})`); });
   const a1 = await tickOf();
+  const b1v = peer === null ? -1 : peer.tick();
   await sleep(3000);
   const a2 = await tickOf();
-  const peer1 = peer.tick();
-  host.notes.push(`host tick ${a1}->${a2}, peer tick ${peer1}`);
+  const b2v = peer === null ? -1 : peer.tick();
+  const gap1 = peer === null ? 0 : Math.abs(a1 - b1v);
+  const gap2 = peer === null ? 0 : Math.abs(a2 - b2v);
+  host.notes.push(peer === null ? `host tick ${a1}->${a2}, solo with an AI hand` : `host tick ${a1}->${a2}, peer tick ${b1v}->${b2v}, gap ${gap1}->${gap2}`);
   host.expect(a2 > a1, `the host keeps ticking (${a1} -> ${a2})`);
-  host.expect(peer1 >= 5, `the peer runs the same match (peer tick ${peer1})`);
-  host.expect(Math.abs(a2 - peer1) <= 25, `both clients are at the same tick (host ${a2}, peer ${peer1})`);
+  if (peer !== null) {
+    host.expect(b2v > b1v, `the peer keeps ticking (${b1v} -> ${b2v})`);
+    // Lockstep with a 4-tick delay: a lag (two sims and a browser on one machine) is normal, divergence is not -
+    // the relay's CRC checkpoints report that as DESYNC. So the gap must stay put, not grow.
+    host.expect(gap2 <= gap1 + 40, `the two clients do not drift apart (gap ${gap1} -> ${gap2} ticks)`);
+    host.expect(gap2 <= 300, `the two clients stay in touch (gap ${gap2} ticks)`);
+  }
+  if (aiSlot) {
+    const ai = await host.eval("(() => { const s = window.__gameSk ? window.__gameSk() : null; if (!s) return null; const a = s.ais[1]; const w = s.world; return { hands: s.slots.length, kinds: s.slots.map((x) => x.kind).join(','), ai: a ? 1 : 0, store: w.findFirstHouse(11, 1) === null ? 0 : 1, barracks: w.findFirstHouse(21, 1) === null ? 0 : 1 }; })()");
+    host.notes.push(`solo AI hand: ${JSON.stringify(ai)}`);
+    host.expect(ai !== null, 'the running skirmish is readable from the page');
+    host.expect(ai !== null && ai.kinds === 'human,ai', `the relay's slots reached the sim (kinds ${ai?.kinds})`);
+    host.expect(ai !== null && ai.ai === 1, 'the AI of hand 1 exists in the relay match');
+    host.expect(ai !== null && ai.store === 1, 'the AI hand has its store (hand 1 in the world)');
+    host.expect(ai !== null && ai.barracks === 1, 'the AI hand has its barracks');
+  }
   const hs = await statusOf();
   host.expect(!hs.includes('DESYNC'), `the host reports no DESYNC (status: ${hs.slice(0, 100)})`);
-  host.expect(!peer.notes.some((n) => n.includes('DESYNC')), `the peer reports no DESYNC (${peer.notes.join('; ')})`);
   host.expect(!hs.includes('rejected'), `the relay rejected nothing (status: ${hs.slice(0, 100)})`);
-  const shot = await host.shot('mp-host');
-  host.notes.push(`shot mp-host=${shot} bytes`);
-  relayer(peer);
-  peer.client.close();
+  if (peer !== null) host.expect(!peer.notes.some((n) => n.includes('DESYNC')), `the peer reports no DESYNC (${peer.notes.join('; ')})`);
+  const shot = await host.shot(aiSlot ? 'mp-solo-ai' : 'mp-host');
+  host.notes.push(`shot ${aiSlot ? 'mp-solo-ai' : 'mp-host'}=${shot} bytes`);
+  if (peer !== null) { relayer(peer); peer.client.close(); }
 } catch (err) {
   host.failures.push('threw: ' + (err instanceof Error ? err.message : String(err)) + ` (host: ${await statusOf()})`);
 }

@@ -6,8 +6,9 @@
 // the relay-driven tick loop.
 //
 // Fixed match settings, because the protocol carries delay/end/crc only: 4 delay ticks, end tick 100000,
-// a CRC checkpoint every 50 ticks and peacetime 0 (peacetime is a local createSkirmish input with no field
-// in the protocol, so both sides must use the same fixed value; recorded in docs/M6-SPIKE.md §12).
+// a CRC checkpoint every 50 ticks, peacetime 0 (peacetime is a local createSkirmish input with no field
+// in the protocol, so both sides must use the same fixed value; recorded in docs/M6-SPIKE.md §12) and the
+// AI start of an `ai` slot (`MP_AI_START`, the same reason and the same fixed value on every client).
 
 import { openRelay, loadMatchFiles, matchHooks } from '../../../packages/net/browserclient.ts';
 import type { MatchFiles } from '../../../packages/net/browserclient.ts';
@@ -20,6 +21,13 @@ export const MP_DELAY_TICKS = 4;
 export const MP_END_TICK = 100000;
 export const MP_CRC_INTERVAL = 50;
 export const MP_PEACE_MINUTES = 0;
+/**
+ * The start an `ai` slot gets in a relay match. The lobby's slot list only carries human/AI, so the handicap is
+ * a fixed value every client agrees on (matchHooks passes it to createSkirmish); it is the setup screen's
+ * default, so an AI in a relay room is the same opponent as an AI in a single-player skirmish. Without it a
+ * host playing alone sits against an AI that cannot raise an army at all (docs/M5-SPIKE.md 7.6).
+ */
+export const MP_AI_START = 'normal';
 
 /** The lobby protocol's map id: "<folder>/<name>" (protocol.ts isMapId). */
 const MAP_ID_RE = /^[A-Za-z][A-Za-z0-9_-]*\/[A-Za-z0-9][A-Za-z0-9 _-]*$/;
@@ -125,8 +133,13 @@ export function createLobby(h: LobbyHandlers): Lobby {
         : esc(s.kind);
       rows.push(`<div class="mprow"><span class="mpdim">hand ${s.hand}${esc(you)}</span><span>${kind} · ${who}</span></div>`);
     }
+    const missing = room.slots.filter((s) => s.kind === 'human' && !room.players.some((p) => p.hand === s.hand)).map((s) => s.hand);
+    const hint =
+      missing.length > 0 && room.phase === 'lobby'
+        ? `<div class="mpdim">start needs a player in hand ${missing.join(', ')} - wait for one to join, or set that slot to AI (the host picks the slots)</div>`
+        : '';
     playersEl.innerHTML =
-      `<div class="mpdim">room ${esc(room.roomId)} · ${esc(room.mapId)} · ${room.phase}${isHost() ? ' · you are the host' : ''}</div>` + rows.join('');
+      `<div class="mpdim">room ${esc(room.roomId)} · ${esc(room.mapId)} · ${room.phase}${isHost() ? ' · you are the host' : ''}</div>` + rows.join('') + hint;
     readyEl.disabled = room.phase !== 'lobby' || mine === null;
     readyEl.textContent = mine !== null && mine.ready ? 'Not ready' : 'Ready';
     startEl.disabled = !(isHost() && room.phase === 'lobby');
@@ -192,6 +205,7 @@ export function createLobby(h: LobbyHandlers): Lobby {
         return files;
       },
       peaceMinutes: MP_PEACE_MINUTES,
+      aiStart: MP_AI_START,
       script: (sk: Skirmish, forTick: number) => h.script(sk, forTick),
       onProblem: (reason: string) => setStatus(reason, true),
       onStart: (sk: Skirmish, start: GameStartMsg) => {
