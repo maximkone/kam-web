@@ -45,6 +45,8 @@ export interface Browser {
   notes: string[];
   expect(ok: boolean, what: string): void;
   webBase: string;
+  /** This run's DevTools port: a check that needs a second page (two players in one browser) opens one here. */
+  cdpPort: number;
   close(): Promise<void>;
   /** Print `<name> PASS (...)` or `<name> FAIL` plus the failures; returns the exit code. */
   report(name: string): number;
@@ -93,14 +95,15 @@ export async function openBrowser(opts: { webPort: number; cdpPort: number; widt
   await waitFree(`http://127.0.0.1:${opts.webPort}/maps`, `web port ${opts.webPort}`, 20000);
   const server = spawn(process.execPath, ['apps/web/serve.ts', '--port', String(opts.webPort)], { cwd: ROOT, stdio: 'ignore' });
   children.push(server);
-  await waitFor(async () => (await fetch(`http://127.0.0.1:${opts.webPort}/maps`)).ok, 'dev server', 90000);
-  // An earlier browser still holding the port would make this one fail silently (its CDP never binds): wait for it to go.
+  await waitFor(async () => (await fetch(`http://127.0.0.1:${opts.webPort}/maps`)).ok, 'dev server', 90000);  // An earlier browser still holding the port would make this one fail silently (its CDP never binds): wait for it to go.
   await waitFree(`http://127.0.0.1:${opts.cdpPort}/json/version`, `CDP port ${opts.cdpPort}`, 20000);
   profile = mkdtempSync(join(SHOTS, 'edge-profile-'));
   // Edge's own log (why DevTools did not bind, if it did not) is kept next to the shots for the failure message.
   const edgeLog = `${profile}.stderr.log`;
   const edge = spawn(EDGE, ['--headless=new', `--remote-debugging-port=${opts.cdpPort}`, `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check',
-    '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist', `--window-size=${width},${height}`, '--enable-logging=stderr', '--v=0', 'about:blank'],
+    '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist', `--window-size=${width},${height}`, '--enable-logging=stderr', '--v=0',
+    // A second page (a second player) must keep its rAF loop running while it is the background tab.
+    '--disable-background-timer-throttling', '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding', 'about:blank'],
   { stdio: ['ignore', openSync(edgeLog, 'w'), 'ignore'] });
   children.push(edge);
   let edgeExit = '';
@@ -134,11 +137,17 @@ export async function openBrowser(opts: { webPort: number; cdpPort: number; widt
   };
   await send('Runtime.enable'); await send('Log.enable'); await send('Page.enable');
   await send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
+  // A page in a window that is not focused is throttled and can be frozen outright, which stops its rAF loop
+  // (measured 2026-10-18: a two-player check lost one player mid-match). Focus emulation + an active lifecycle
+  // keep every page of this run running at full speed. Both are best-effort: an old Edge may not know them.
+  try { await send('Emulation.setFocusEmulationEnabled', { enabled: true }); } catch { /* older Edge */ }
+  try { await send('Page.setWebLifecycleState', { state: 'active' }); } catch { /* older Edge */ }
 
   const mouse = async (type: string, x: number, y: number, button: string, buttons: number, extra: object = {}): Promise<void> => { await send('Input.dispatchMouseEvent', { type, x, y, button, buttons, clickCount: 1, ...extra }); };
   const b: Browser = {
     eval: evalExpr, send,
     webBase: `http://127.0.0.1:${opts.webPort}`,
+    cdpPort: opts.cdpPort,
     goto: async (p) => { await send('Page.navigate', { url: p.startsWith('http') ? p : `http://127.0.0.1:${opts.webPort}${p}` }); },
     shot: async (name) => { const r = await send('Page.captureScreenshot', { format: 'png' }); const buf = Buffer.from(r.data as string, 'base64'); writeFileSync(join(SHOTS, name + '.png'), buf); return buf.length; },
     click: async (x, y, o) => { const btn = o?.button ?? 'left'; const bs = btn === 'left' ? 1 : 2; const mod = o?.shift ? { modifiers: 8 } : {}; await mouse('mouseMoved', x, y, 'none', 0, mod); await mouse('mousePressed', x, y, btn, bs, mod); await mouse('mouseReleased', x, y, btn, 0, mod); },

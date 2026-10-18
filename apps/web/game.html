@@ -7,7 +7,7 @@
 <style>
 html, body { margin: 0; height: 100%; overflow: hidden; background: #202830; color: #cfd8e3; font: 13px/1.4 ui-monospace, Consolas, monospace; }
 canvas { display: block; width: 100vw; height: 100vh; }
-#setup { position: fixed; inset: 0; z-index: 20; background: rgba(32,40,48,0.92); display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 24px; }
+#setup { position: fixed; inset: 0; z-index: 20; background: rgba(32,40,48,0.92); display: flex; flex-direction: column; align-items: center; justify-content: flex-start; overflow-y: auto; padding: 24px 24px 40px; box-sizing: border-box; }
 #setup.hide { display: none; }
 #setup h1 { margin: 0 0 8px; font-size: 22px; letter-spacing: 0.5px; }
 #setup .subtitle { opacity: 0.7; margin-bottom: 18px; font-size: 12px; }
@@ -25,6 +25,25 @@ canvas { display: block; width: 100vw; height: 100vh; }
 #slottbl select, #opts select { background: #10151b; color: #cfd8e3; border: 1px solid #3a4653; border-radius: 4px; font: inherit; font-size: 12px; padding: 2px 6px; }
 #startbtn { padding: 10px 28px; font: inherit; font-size: 15px; background: #3a7a55; color: #fff; border: 0; border-radius: 4px; cursor: pointer; margin-top: 10px; }
 #startbtn:hover { background: #2e6348; }
+/* M6 multiplayer panel (apps/web/game/lobby.ts) */
+#mp { width: min(720px, 94vw); margin-top: 18px; padding-top: 12px; border-top: 1px solid #3a4653; }
+#mp h2 { font-size: 15px; margin: 0 0 8px; }
+.mprow { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin-bottom: 6px; font-size: 12px; }
+.mprow label { display: flex; align-items: center; gap: 6px; opacity: 0.85; }
+#mp input[type="text"] { background: #10151b; color: #cfd8e3; border: 1px solid #3a4653; border-radius: 4px; padding: 4px 6px; font: inherit; font-size: 12px; }
+#relayurl { width: 210px; }
+#mpname, #mpjoinid { width: 96px; }
+#mphands { background: #10151b; color: #cfd8e3; border: 1px solid #3a4653; border-radius: 4px; padding: 3px 4px; font: inherit; font-size: 12px; }
+.mpbtn { background: #2a3644; color: #cfd8e3; border: 1px solid #3a4653; border-radius: 4px; padding: 4px 10px; font: inherit; font-size: 12px; cursor: pointer; }
+.mpbtn:hover:not(:disabled) { background: #344556; }
+.mpbtn:disabled { opacity: 0.4; cursor: not-allowed; }
+#mprooms, #mpplayers { border: 1px solid #2a323d; border-radius: 4px; background: #1b222b; padding: 6px 8px; margin-bottom: 6px; max-height: 22vh; overflow: auto; }
+#mpplayers .mprow { margin-bottom: 2px; }
+.mpslot { background: #10151b; color: #cfd8e3; border: 1px solid #3a4653; border-radius: 4px; font: inherit; font-size: 12px; padding: 1px 3px; }
+.mpdim { opacity: 0.65; font-size: 11px; }
+#mpstatus { font-size: 12px; opacity: 0.85; margin: 4px 0 6px; min-height: 16px; }
+#mpstatus.bad { color: #ff9d94; opacity: 1; }
+#mpstart:not(:disabled) { background: #3a7a55; color: #fff; border-color: #4c8f66; }
 #topbar { position: fixed; top: 0; left: 0; right: 0; min-height: 42px; background: rgba(27,34,43,0.9); border-bottom: 1px solid #3a4653; z-index: 30; display: flex; flex-wrap: wrap; align-items: center; padding: 4px 12px; gap: 4px 14px; pointer-events: none; font-size: 12px; box-sizing: border-box; }
 #topbar * { pointer-events: auto; }
 #topbar button { background: #2a3644; color: #cfd8e3; border: 1px solid #3a4653; border-radius: 4px; padding: 3px 8px; font: inherit; font-size: 12px; cursor: pointer; }
@@ -108,6 +127,35 @@ canvas { display: block; width: 100vw; height: 100vh; }
     </select></label>
   </div>
   <button id="startbtn">Start skirmish</button>
+
+  <!-- M6 multiplayer (docs/M6-SPIKE.md §2): host or join a relay room; the map picker above is the host's map -->
+  <div id="mp">
+    <h2>Multiplayer (relay)</h2>
+    <div class="mprow">
+      <label>Relay <input id="relayurl" type="text" value="ws://127.0.0.1:8130" spellcheck="false" autocomplete="off"></label>
+      <label>Name <input id="mpname" type="text" value="player" maxlength="32" spellcheck="false" autocomplete="off"></label>
+      <label>Hands <select id="mphands" aria-label="Hands">
+        <option value="2" selected>2</option>
+        <option value="3">3</option>
+        <option value="4">4</option>
+      </select></label>
+    </div>
+    <div class="mprow">
+      <button class="mpbtn" id="mphost">Host game</button>
+      <button class="mpbtn" id="mprefresh">Relay rooms</button>
+      <input id="mpjoinid" type="text" placeholder="room id" spellcheck="false" autocomplete="off">
+      <button class="mpbtn" id="mpjoin">Join</button>
+      <button class="mpbtn" id="mpleave" disabled>Leave</button>
+    </div>
+    <div id="mprooms"></div>
+    <div id="mpplayers"></div>
+    <div class="mprow">
+      <button class="mpbtn" id="mpready" disabled>Ready</button>
+      <button class="mpbtn" id="mpstart" disabled>Start match</button>
+    </div>
+    <div id="mpstatus"></div>
+    <div class="mpdim">the relay carries the map, the slots and the timing; peacetime is 0 min and an AI slot uses the sim's default start</div>
+  </div>
 </div>
 
 <div id="topbar">

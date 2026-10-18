@@ -176,10 +176,9 @@ Everything deterministic given seeds: run check twice → print both shas
 - Measured (the lead re-runs these; numbers from the 2026-10-17 session):
   - `node tools/nettest/cli.ts --check` (two runs, MapsMP/Battle Sun, 3000 ticks, delay 4, CRC every 50, 0-20 ms jitter per client send, 2 humans): both runs `NET CHECK PASS (2 clients, 3000 ticks, 16 commands, hash 457b6316, identical)`; run 1 relay 779 msgs/s and 5.20 ms/tick (6127 in, 6018 out, wall 15.6 s), run 2 794 msgs/s and 5.10 ms/tick (wall 15.3 s); the lobby battery and the disconnect run pass; whole check about 35 s.
   - Same match with CRC every tick and no corruption (throwaway copy, not committed): PASS, 1183 msgs/s, 5.08 ms/tick.
-  - `node tools/nettest/cli.ts --break`: DESYNC with the corrupted copy at tick 5 on client B; the first CRC mismatch is reported at tick 5 (lead re-run 2026-10-17: `NET DESYNC first bad tick 5`, `NET CHECK FAIL: DESYNC at tick 5`); exit 1 by design.
+  - `node tools/nettest/cli.ts --break`: DESYNC with the corrupted copy at tick 5 on client B; the first CRC mismatch is reported at tick 5 or 7, whichever tick's command the corruptor picks (lead runs: `NET DESYNC first bad tick 5` on 2026-10-17, `NET DESYNC first bad tick 7` on 2026-10-18 — both with `corrupted command on client B at tick 5`); exit 1 by design.
   - `node --test packages/net/*.test.ts`: 34 pass, 0 fail. `node --test packages/sim/*.test.ts`: 131 pass, 0 fail. `node tools/skirmish/cli.ts --check`: SKIRMISH CHECK PASS. `npx tsc --noEmit`: no errors.
 - Not done:
-  - Lobby UI in apps/web (browserclient.ts is not wired in; apps/web was not touched).
   - Rejoin after a drop (a dropped hand stays out for the rest of the match).
   - Spectators.
   - Resync (out of scope, the match stops at the first desync).
@@ -187,4 +186,15 @@ Everything deterministic given seeds: run check twice → print both shas
   - Neutral conversion of a dropped hand (its units stay as they are).
   - AI-controlled slots over the wire (the relay accepts `ai` slots, the nettest uses humans only).
   - Team and colour slot fields (accepted by the protocol, unused).
+- The browser path is covered by `tools/uicheck/b3.ts` (2026-10-18): one player is a real Edge window that hosts a
+  room and runs the match, the other is the same `packages/net/browserclient.ts` client run by Node (the third
+  option below was not needed - a second browser window is throttled and can be frozen, which killed a player
+  mid-check). Result: `UI B3 CHECK PASS (host created room tx3uezc1; peer mapSha b49c3abf... definesSha
+  0170a4ef...; host tick 5->1413, peer tick 1418; shot mp-host=700611 bytes)`. The peer's shas are computed from
+  the same `/mapfile` + `/defines` bytes the browser hashes, so the relay's sha check passing means both sides
+  agreed on the map.
+- Relay keepalive (2026-10-18): `apps/server/relay.ts` passes `pingMs 5000 / idleMs 20000` to `WsServer`, whose
+  1 s/3 s defaults dropped a silent lobby player after three seconds - and with no rejoin that player was out for
+  the match. The game itself never trips it (a client frames every tick).
 - Deviations from section 4-6 above: the rate limit is 1000 game messages per second per connection (a 50/s cap would throttle the lockstep sets); the CRC is CRC32 of the canonical state string (not sha256; the nettest prints the sha256 of the same string).
+- Lobby wired on the browser side (2026-10-17 session, second pass): `apps/web/game/lobby.ts` (relay field, host/join, room list, player+AI slots, ready/start, leave) and `packages/net/browserclient.ts` (`loadMatchFiles`, `matchHooks`; `openRelay`/`sha256Hex`/`definesSha` kept), with `apps/web/serve.ts` serving `/packages/net/*.js`. The relay protocol is fixed, so multiplayer hardcodes delay 4, end tick 100000 and CRC every 50 ticks, and peacetime 0 (peacetime is a local `createSkirmish` input with no protocol field, so both sides must agree on it); pause and speed are hidden while a match runs. Commands re-run 2026-10-17: `npx tsc --noEmit` no output; `node --test packages/net/{protocol,lockstep,client,relay}.test.ts` -> `tests 34`, `pass 34`, `fail 0`; `node --no-warnings tools/nettest/cli.ts --check` -> `NET CHECK PASS (2 clients, 3000 ticks, 16 commands, hash 457b6316, identical)`; `node --no-warnings tools/nettest/cli.ts --break` -> `NET DESYNC first bad tick 5: the CRC32 values differ {"0":"94542bee","1":"b0e8bf1c"}; client B's copy of tick 5 was corrupted`, then `NET CHECK FAIL: DESYNC at tick 5 (corrupted command on client B at tick 5; the match stopped)`, exit 1; `git diff --stat` 7 files changed, 367 insertions(+), 36 deletions(-).

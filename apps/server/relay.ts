@@ -117,7 +117,14 @@ export class Relay {
   constructor(opts: RelayOptions = {}) {
     this.seed = opts.seed ?? null;
     this.lateMs = opts.lateMs ?? 200;
-    this.server = new WsServer({ host: opts.host ?? '127.0.0.1', port: opts.port ?? 0 });
+    this.server = new WsServer({
+      host: opts.host ?? '127.0.0.1',
+      port: opts.port ?? 0,
+      // A lobby player is silent between clicks, and a busy tab can stop answering for a few
+      // seconds: the 3 s default would drop a real player with no way back (no rejoin yet).
+      pingMs: 5000,
+      idleMs: 20000,
+    });
     this.server.onconnection = (ws: WsConn) => this.onConnection(ws);
   }
 

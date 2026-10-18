@@ -45,7 +45,9 @@ export interface UiState {
 }
 
 export interface GameUi {
-  attach(sk: Skirmish, map: KaMap): void;
+  /** Attach a running skirmish. `hand` is the hand this client plays (the first human hand by default; the
+   *  relay's yourHand in a multiplayer match). */
+  attach(sk: Skirmish, map: KaMap, hand?: number): void;
   detach(): void;
   /** The queued commands, stamped with the tick they will run on (one batch per step). */
   takeCommands(tick: number): Command[];
@@ -540,9 +542,9 @@ export function createUi(view: PlayView, cv: HTMLCanvasElement, ov: HTMLCanvasEl
   };
 
   return {
-    attach(s: Skirmish, km: KaMap): void {
+    attach(s: Skirmish, km: KaMap, handOverride?: number): void {
       sk = s;
-      hand = humanHands(s)[0] ?? 0;
+      hand = typeof handOverride === 'number' ? handOverride : (humanHands(s)[0] ?? 0);
       queue.length = 0;
       results.length = 0;
       press = null;

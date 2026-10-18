@@ -1,14 +1,22 @@
-// game/game.ts — B1 game shell (setup -> skirmish -> end). Uses the existing play.ts renderer hook.
+// game/game.ts — B1 game shell (setup -> skirmish -> end) plus the M6 multiplayer lobby (docs/M6-SPIKE.md §2,
+// §11): the setup screen hosts or joins a relay room, and a relay match runs the same sim with the relay as
+// the clock (one NetClient.advance() per 100 ms tick, only on the relay's broadcasts).
+// Uses the existing play.ts renderer hook.
 // Import paths keep .ts for node build; serve.ts rewrites them to .js for the browser.
 import { createSkirmish, step, skirmishStatus, humanHands } from '../../../packages/sim/skirmish.ts';
-import type { Skirmish, SkirmishSlot, SkirmishDefines, SkirmishStatus } from '../../../packages/sim/skirmish.ts';
+import type { Skirmish, SkirmishSlot, SkirmishDefines, SkirmishStatus, StepResult } from '../../../packages/sim/skirmish.ts';
 import { parseMapFileBytes } from '../../../packages/map/map.ts';
 import type { KaMap } from '../../../packages/map/map.ts';
 import { AI_START_LEVELS, isAiStartLevel } from '../../../packages/sim/aistart.ts';
 import type { AiStartLevel } from '../../../packages/sim/aistart.ts';
+import type { NetClient } from '../../../packages/net/client.ts';
+import type { GameStartMsg } from '../../../packages/net/protocol.ts';
+import type { MatchFiles } from '../../../packages/net/browserclient.ts';
 import { createUi } from '../ui/ui.ts';
 import type { GameUi, PlayView } from '../ui/ui.ts';
 import { installGameTest } from '../ui/gametest.ts';
+import { createLobby } from './lobby.ts';
+import type { Lobby } from './lobby.ts';
 
 const MAP_LIST_URL = '/maps';
 const TICK_MS = 100; // 10 ticks/s
@@ -31,6 +39,9 @@ let running = false;
 let startTimeMs = 0;
 let endScreenActive = false;
 let ui: GameUi | null = null; // B2A: the game UI (input router, panels, minimap, command queue)
+let net: NetClient | null = null; // M6: the relay client while a multiplayer match runs (null = single player)
+let myHand = 0; // the hand this client plays (single player: the first human hand; multiplayer: yourHand)
+let lobby: Lobby | null = null; // M6: the multiplayer panel of the setup screen
 (window as any).__gameSk = (): Skirmish | null => sk; // debug/test: the running skirmish (tools/uicheck/b1.ts reads its AI slot)
 
 interface MatchSetup {
@@ -118,12 +129,21 @@ function startGame(kind: string, name: string): void {
       if (tickAcc > TICK_MS * 20) tickAcc = TICK_MS * 20; // never run more than 20 ticks in one frame (hidden tab, slow AI)
       lastFrame = wall;
       while (tickAcc >= TICK_MS && running && !paused && !endScreenActive) {
-        tickAcc -= TICK_MS;
-        if (sk !== null) {
-          const cmds = ui !== null ? ui.takeCommands(sk.world.tickCount + 1) : [];
-          const res = step(sk, cmds);
-          if (ui !== null) ui.afterStep(res);
-          stats.steps++;
+        if (net !== null) {
+          // Multiplayer: the relay is the clock. One advance() runs every broadcast tick that has arrived
+          // (so a slower peer sets the pace); when none has, the tick waits instead of running ahead.
+          const n = net.advance();
+          if (n === 0) break;
+          tickAcc -= TICK_MS;
+          stats.steps += n;
+        } else {
+          tickAcc -= TICK_MS;
+          if (sk !== null) {
+            const cmds = ui !== null ? ui.takeCommands(sk.world.tickCount + 1) : [];
+            const res = step(sk, cmds);
+            if (ui !== null) ui.afterStep(res);
+            stats.steps++;
+          }
         }
       }
       if (sk !== null && !paused) {
@@ -149,24 +169,36 @@ function updateTop(): void {
   // the stock row is drawn by the game UI (ui/panels.ts renderStock)
 }
 
-function showEnd(st: SkirmishStatus): void {
+function showEnd(st: SkirmishStatus, note?: string): void {
   endScreenActive = true;
   running = false;
-  const h = st.hands.find((h: { kind: string; status: string }) => h.kind === 'human');
-  if (h) {
-    if (h.status === 'won') {
-      endtitle.textContent = 'Victory';
-      endreason.textContent = 'Your hand has won.';
-    } else if (h.status === 'defeated') {
-      endtitle.textContent = 'Defeat';
-      endreason.textContent = 'Your hand has been defeated.';
+  // M6: the relay has no "the match is over" message, so a finished client leaves the socket; the other
+  // client gets game/playerLeft and the deterministic hand-out rule of the relay (docs/M6-SPIKE.md §6).
+  if (net !== null) {
+    const c = net;
+    net = null;
+    if (c.status === 'open') c.close();
+  }
+  if (note !== undefined) {
+    endtitle.textContent = 'Match Over';
+    endreason.textContent = note;
+  } else {
+    const h = st.hands.find((h: { kind: string; status: string }) => h.kind === 'human');
+    if (h) {
+      if (h.status === 'won') {
+        endtitle.textContent = 'Victory';
+        endreason.textContent = 'Your hand has won.';
+      } else if (h.status === 'defeated') {
+        endtitle.textContent = 'Defeat';
+        endreason.textContent = 'Your hand has been defeated.';
+      } else {
+        endtitle.textContent = 'Match Over';
+        endreason.textContent = `Status: ${h.status}`;
+      }
     } else {
       endtitle.textContent = 'Match Over';
-      endreason.textContent = `Status: ${h.status}`;
+      endreason.textContent = 'No human hand.';
     }
-  } else {
-    endtitle.textContent = 'Match Over';
-    endreason.textContent = 'No human hand.';
   }
   const sec = Math.floor((performance.now() - startTimeMs) / 1000);
   endstats.textContent = `Ticks played: ${st.tick} · Time: ${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
@@ -201,6 +233,12 @@ backbtn.addEventListener('click', () => {
   running = false;
   sk = null;
   if (ui !== null) ui.detach();
+  if (net !== null) {
+    const c = net;
+    net = null;
+    if (c.status === 'open') c.close();
+  }
+  lobby?.reset();
 });
 
 pausebtn.addEventListener('click', () => {
@@ -221,6 +259,7 @@ endbtn.addEventListener('click', () => {
 
 // ---- Keyboard (only behind ?dev=1; but spec asks for game keys) ----
 window.addEventListener('keydown', (e) => {
+  if (net !== null) return; // multiplayer: the relay clocks the match (no local pause or speed)
   if (e.key === ' ' || e.key === 'Spacebar') {
     e.preventDefault();
     paused = !paused;
@@ -287,13 +326,15 @@ async function initAndStart(kind: string, name: string, setup: MatchSetup): Prom
   const hook = await waitForHook();
   if (hook && typeof hook.attachWorld === 'function') {
     const parsed = parseMapFileBytes(mapBuf, `${kind}/${name}`);
-    hook.attachWorld(sk.world, parsed.map, 0);
+    const hand = humanHands(sk)[0] ?? 0;
+    myHand = hand;
+    hook.attachWorld(sk.world, parsed.map, hand);
     mapnameEl.textContent = `${kind}/${name}`;
     if (ui === null) {
       ui = createUi(hook as PlayView, document.getElementById('cv') as HTMLCanvasElement, document.getElementById('ov') as HTMLCanvasElement);
-      installGameTest({ sk: () => sk, hand: () => (sk === null ? 0 : humanHands(sk)[0] ?? 0), view: hook as PlayView, ui });
+      installGameTest({ sk: () => sk, hand: () => myHand, view: hook as PlayView, ui });
     }
-    if (sk !== null) ui.attach(sk, parsed.map);
+    if (sk !== null) ui.attach(sk, parsed.map, hand);
   } else {
     console.error('No renderer hook found (window.__kamplay.attachWorld)');
     alert('Renderer hook missing — game cannot render. Check play.js load.');
@@ -303,7 +344,6 @@ async function initAndStart(kind: string, name: string, setup: MatchSetup): Prom
   // Set up initial camera roughly centered
   try {
     const hook2 = (window as any).__kamplay;
-    const myHand = humanHands(sk)[0] ?? 0;
     if (hook2 && typeof hook2.jumpToVillage === 'function') {
       if (!hook2.jumpToVillage(myHand) && typeof hook2.setCam === 'function') hook2.setCam(256, 256, 1);
     }
@@ -311,7 +351,45 @@ async function initAndStart(kind: string, name: string, setup: MatchSetup): Prom
     // ignore
   }
 
+  setTopButtons(true);
   startGame(kind, name);
+}
+
+/**
+ * M6: the renderer and the game UI of a relay match. game/start already built the skirmish
+ * (browserclient.matchHooks) from the bytes this client loaded and hashed for the room; here the same
+ * bytes feed the renderer, the UI plays `start.yourHand`, and the loop above takes over the stepping.
+ */
+async function attachMultiplayer(msk: Skirmish, files: MatchFiles, start: GameStartMsg): Promise<void> {
+  const hook = await waitForHook();
+  if (hook === null || typeof hook.attachWorld !== 'function') {
+    console.error('No renderer hook found (window.__kamplay.attachWorld)');
+    alert('Renderer hook missing — game cannot render. Check play.js load.');
+    return;
+  }
+  const parsed = parseMapFileBytes(files.mapBytes, `${files.kind}/${files.name}`);
+  hook.attachWorld(msk.world, parsed.map, start.yourHand);
+  mapnameEl.textContent = `${files.mapId} · hand ${start.yourHand}`;
+  if (ui === null) {
+    ui = createUi(hook as PlayView, document.getElementById('cv') as HTMLCanvasElement, document.getElementById('ov') as HTMLCanvasElement);
+    installGameTest({ sk: () => sk, hand: () => myHand, view: hook as PlayView, ui });
+  }
+  ui.attach(msk, parsed.map, start.yourHand);
+  try {
+    if (typeof hook.jumpToVillage === 'function') {
+      if (!hook.jumpToVillage(start.yourHand) && typeof hook.setCam === 'function') hook.setCam(256, 256, 1);
+    }
+  } catch {
+    // ignore
+  }
+  setTopButtons(false);
+  startGame(files.kind, files.name);
+}
+
+/** Pause and speed are local-clock controls: hidden while the relay clocks the match. */
+function setTopButtons(singlePlayer: boolean): void {
+  pausebtn.classList.toggle('hide', !singlePlayer);
+  speedbtn.classList.toggle('hide', !singlePlayer);
 }
 
 // ---- Boot ----
@@ -320,6 +398,27 @@ async function boot(): Promise<void> {
   (window as any).__mapList = maps;
   renderMapList(maps);
   renderSlots();
+  lobby = createLobby({
+    selectedMap: () => {
+      const btn = maplistEl.querySelector('.maprow.active') as HTMLButtonElement | null;
+      if (btn === null) return null;
+      return { kind: btn.getAttribute('data-kind') ?? '', name: btn.getAttribute('data-name') ?? '' };
+    },
+    // A relay match steps only on the relay's broadcasts; the UI's queued commands ride the next set.
+    script: (_sk: Skirmish, forTick: number) => (ui === null ? [] : ui.takeCommands(forTick)),
+    onGameStart: (client: NetClient, msk: Skirmish, files: MatchFiles, start: GameStartMsg) => {
+      net = client;
+      myHand = start.yourHand;
+      sk = msk;
+      client.onStep = (_tick: number, res: StepResult) => {
+        if (ui !== null) ui.afterStep(res);
+      };
+      client.onFinished = (reason: string) => {
+        if (sk !== null) showEnd(skirmishStatus(sk), `relay: ${reason}`);
+      };
+      void attachMultiplayer(msk, files, start);
+    },
+  });
   setupEl.classList.remove('hide');
   // Start stays disabled until the renderer is ready, so a click can never race its boot.
   startbtn.disabled = true;
