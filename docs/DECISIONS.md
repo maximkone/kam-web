@@ -2,6 +2,51 @@
 
 Newest first. Only decisions the lead/owner actually made, with evidence.
 
+## 2026-10-17 - route: the TypeScript port is the main line, the FPC->wasm port is paused
+
+- **Decided: TypeScript carries the game; the FPC->wasm route is paused.** Why: the wasm estimate is sim core
+  3-5 weeks and the whole engine 2-4 months, only **106 of 440** sim-core units compile to wasm, and there is
+  **no PascalScript bridge** for wasm32 - so campaigns and scripted maps (683 `.script` files) stay blocked even
+  after the sim runs. State: `docs/PORT-WASM.md`; estimate and toolchain: `docs/PORT-FPC.md`.
+- The unfinished wasm host code rests at `C:\_quarantine\2026-10-17\kam-web-host-wip` (quarantined, never
+  hard-deleted); `docs/PORT-HOST-CONTRACT.md` keeps the host contract it was written against. Why: the route can
+  be resumed without re-deriving the honest gap list.
+
+## 2026-10-17 - AI handicap: an "AI start" level and peacetime minutes in the setup screen
+
+- The AI cannot raise an army organically (`docs/M5-SPIKE.md` 7.6), so setup hands it an artificial start:
+  **AI start** none / light / normal / hard (`normal` by default) and **peacetime** 0..240 minutes (setup default
+  10, sim default 0). Why: a handicap buys the owner a real opponent without a full economy port first, and
+  peacetime is how the AI is stopped from attacking at 4:31.
+
+## 2026-10-17 - standard maps get a fallback start store; Arena's AI starts with no barracks
+
+- On standard-format maps (Atoll, Equilibrium, Rain Season, Arena) the port places a fallback start store
+  (`placeNearestStorehouse`, `packages/sim/skirmish.ts`). Why: the reference gives these maps no start store and a
+  hand with no store cannot run the ported economy - a deliberate port choice, not a ported rule.
+- Arena has no barracks spot anywhere, so the AI on it starts with groups and no barracks (the barracks start
+  lookup returns -1). Why: the fallback cannot invent a legal building site the map does not have; -1 records the
+  fact instead of failing the match.
+
+## 2026-10-17 - AI food build-out follows the Pascal bid costs (accepted regression)
+
+- The AI food build-out uses the Pascal bid costs (the bid's random and construction terms, `docs/M5-SPIKE.md`
+  7.9), not the priority table. Accepted trade-off: in the aisim window completed houses go **7 -> 5** and
+  stone-out **24 -> 19**. Why: the earlier, prettier numbers came from an unfaithful store take-all, so fidelity
+  wins and the worse numbers are the correct ones.
+
+## 2026-10-17 - worker rule: Haiku or free DeepSeek Flash only, and a worker's PASS proves nothing
+
+- Workers run on **Haiku or free DeepSeek Flash only** (no paid model, no paid flag). A worker's PASS line alone
+  proves nothing: the lead re-runs every check (the M5d-B1 entry below - a stub printed PASS while the page was
+  dead). Why: the report is a claim, only the re-run command is evidence.
+
+## 2026-10-17 - repo: maximkone/kam-web is public, AGPL-3.0, no game assets tracked
+
+- GitHub `maximkone/kam-web` is **public** under **AGPL-3.0** and tracks **no game assets** (`docs/CREDITS.md`).
+  Why: the port is a derived work of the AGPL KaM Remake and must share that licence, and the art/data stays
+  player-supplied - imported from a KaM install, never shipped in the repo.
+
 ## 2026-10-17 - M5d-B1 accepted after lead fixes: the game shell runs in a real browser (worker P + lead)
 
 - Worker P's report said PASS but its `b1.ts` was a stub that only printed PASS, and the page was dead in a real browser

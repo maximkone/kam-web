@@ -255,13 +255,14 @@ export function createPanels(doc: Document, act: (name: string, value: string) =
     },
     renderStock(w, hand) {
       const parts = STOCK_WARES.map((ware) => {
-        const label = ware === 0 ? 'trunks' : wareName(ware);
+        const label = WARE_SHORT[ware] ?? wareName(ware);
         return `${label}=${w.handWareBalance(hand, ware)}`;
       });
       const text = parts.join('  ');
       if (text === lastStock) return;
       lastStock = text;
       stockEl.textContent = text;
+      stockEl.title = STOCK_WARES.map((ware) => wareName(ware)).join(', ');
     },
     renderHint(mode, houseType) {
       const text = hintText(mode, houseType);

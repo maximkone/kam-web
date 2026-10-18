@@ -34,7 +34,10 @@ try {
   b.expect(t2 > t1 + 5, `ticks advance at 1x (${t1} -> ${t2})`);
   const sz1 = await b.shot('b1-in-game');
   b.expect(sz1 > 80000, `the canvas shows a textured scene (screenshot ${sz1} bytes)`);
-  b.expect(/trunks=\d+/.test(String(await b.eval("document.getElementById('stock').textContent"))), 'top bar shows the stock');
+  const stockText = String(await b.eval("document.getElementById('stock').textContent"));
+  const stockTitle = String(await b.eval("document.getElementById('stock').title"));
+  b.expect(/trk=\d+/.test(stockText), `the top bar shows the compact stock (got "${stockText.slice(0, 60)}")`);
+  b.expect(/trunk/.test(stockTitle) && /timber/.test(stockTitle), `the top bar keeps the full ware names in its title (got "${stockTitle.slice(0, 60)}")`);
 
   await b.eval("document.getElementById('pausebtn').click()"); await sleep(300);
   const p1 = await tick(); await sleep(1500); const p2 = await tick();
@@ -46,7 +49,7 @@ try {
   const b1v = await tick(); await sleep(2000); const b2v = await tick();
   b.expect((await b.eval("document.getElementById('speedbtn').textContent")) === '4x', 'speed button reads 4x');
   b.expect(b2v - b1v > (a2 - a1) * 1.5, `4x runs faster than 1x (${a2 - a1} vs ${b2v - b1v} ticks in 2 s)`);
-  b.notes.push(`maps=${mapCount}`, `tick ${t1}->${t2}`, `1x=${a2 - a1}/2s 4x=${b2v - b1v}/2s`, `shots setup ${sz0} in-game ${sz1} bytes`);
+  b.notes.push(`maps=${mapCount}`, `tick ${t1}->${t2}`, `1x=${a2 - a1}/2s 4x=${b2v - b1v}/2s`, `shots setup ${sz0} in-game ${sz1} bytes`, `stock "${stockText.slice(0, 40)}"`);
 
   // the fog regression: the player's own village used to go black ~30 game seconds in (tick ~300): look again later
   await waitFor(async () => (await tick()) >= 450 ? true : null, 'tick >= 450 at 4x', 90000);
