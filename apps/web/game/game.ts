@@ -79,6 +79,8 @@ const localFolderBtn = document.getElementById('localfolder')! as HTMLButtonElem
 const localReconnectBtn = document.getElementById('localreconnect')! as HTMLButtonElement;
 const localForgetBtn = document.getElementById('localforget')! as HTMLButtonElement;
 const localStatusEl = document.getElementById('localstatus')!;
+/** False when this host has no assets of its own (a static site before a KaM folder is picked). */
+let assetsReady = true;
 
 function renderLocal(state: LocalState): void {
   localStatusEl.textContent = state.detail;
@@ -455,8 +457,11 @@ async function boot(): Promise<void> {
     maps = await loadMapList();
   } catch (err) {
     // A static host has no /maps route: the map list needs the player's own KaM folder (docs/DEPLOY.md 4).
+    assetsReady = false;
     localStatusEl.textContent = `no assets yet (${err instanceof Error ? err.message : String(err)}): click "Use my KaM folder"`;
     localStatusEl.classList.add('bad');
+    startbtn.disabled = true;
+    startbtn.textContent = 'Use my KaM folder first';
   }
   (window as any).__mapList = maps;
   renderMapList(maps);
@@ -485,8 +490,15 @@ async function boot(): Promise<void> {
   setupEl.classList.remove('hide');
   // Start stays disabled until the renderer is ready, so a click can never race its boot.
   startbtn.disabled = true;
-  startbtn.textContent = 'Loading renderer...';
+  startbtn.textContent = assetsReady ? 'Loading renderer...' : 'Use my KaM folder first';
   void waitForHook().then((h) => {
+    if (h === null && !assetsReady) {
+      // A static host has no assets of its own: nothing can render until the visitor picks their KaM
+      // folder (docs/DEPLOY.md 4), so say that instead of reporting a renderer failure.
+      startbtn.textContent = 'Use my KaM folder first';
+      startbtn.disabled = true;
+      return;
+    }
     startbtn.disabled = h === null;
     startbtn.textContent = h !== null ? 'Start skirmish' : 'Renderer failed to load';
   });

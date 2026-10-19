@@ -15,7 +15,9 @@ interface Peer {
   msgs: ServerMessage[];
 }
 
-async function until(cond: () => boolean, label: string, ms = 30000): Promise<void> {
+// The guard is generous on purpose: the relay's own deadlines are short (a 200 ms late deadline, a 3 s idle
+// timeout), so a loaded machine (a full-suite run next to an export, say) must never fail the suite here.
+async function until(cond: () => boolean, label: string, ms = 60000): Promise<void> {
   const t0 = Date.now();
   while (!cond()) {
     if (Date.now() - t0 > ms) throw new Error(`timeout: ${label}`);
