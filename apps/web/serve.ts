@@ -389,6 +389,7 @@ const GAME_MODULE_ROUTE = /^\/apps\/web\/(game|ui)\/([A-Za-z0-9_-]+)\.js$/;
   }
 
   const page = path === '/' || path === '/index.html' ? 'index.html'
+    : path === '/viewer.html' ? 'viewer.html'
     : path === '/map.html' ? 'map.html'
       : path === '/play.html' ? 'play.html'
         : path === '/game.html' ? 'game.html'
@@ -495,12 +496,18 @@ function exportSite(outDir: string, relayWs: string | null): void {
     '<script src="relay-config.js"></script>\n<script type="module" src="apps/web/play.js"></script>',
   );
   writeFileSync(join(abs, 'game.html'), withConfig);
-  writeFileSync(join(abs, 'index.html'), withConfig);
+
+  // index.html is the front page of a deployment, not a copy of the game: the launcher explains what the
+  // player must supply and where to go, and the relay address is injected into it the same way.
+  const launcher = readFileSync(join(WEB_TS_DIR, 'index.html'), 'utf8');
+  if (!launcher.includes('href="/game.html"')) throw new Error('index.html is no longer the launcher: update exportSite');
+  writeFileSync(join(abs, 'index.html'), launcher.replace('<title>', '<script src="relay-config.js"></script>\n<title>'));
   writeFileSync(join(abs, 'README.txt'), [
     'kam-web - the browser client only. It ships no KaM art or maps.',
     '',
-    'Serve this folder over HTTP(S) (a static host, or "npx serve" locally) and open index.html.',
-    'Then click "Use my KaM folder" and pick the KaM Remake folder you already own: the page reads',
+    'Serve this folder over HTTP(S) (a static host, or "npx serve" locally) and open index.html (the front',
+    'page), then Play skirmish. On the setup screen click "Use my KaM folder" and pick the KaM Remake',
+    'folder you already own: the page reads',
     'data\\Sprites\\*.rxx, data\\defines, Maps, MapsMP and Tutorials from it, builds the atlases in your',
     'browser and keeps them in IndexedDB. Nothing is uploaded anywhere.',
     '',

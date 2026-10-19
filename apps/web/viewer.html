@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>kam-web M0 — sprite viewer</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #14181f; color: #cfd8e3;
+               font: 13px/1.4 ui-monospace, Consolas, monospace; }
+  #bar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 8px 10px; }
+  #bar select, #bar input, #bar button { background: #202830; color: #cfd8e3;
+    border: 1px solid #3a4653; border-radius: 4px; padding: 3px 8px; font: inherit; }
+  #bar button { cursor: pointer; }
+  #bar button.on { background: #2f5d8a; border-color: #4d86c2; }
+  #idx { width: 7ch; }
+  #hud { position: fixed; left: 10px; bottom: 8px; opacity: .85; white-space: pre; pointer-events: none; }
+  #hint { position: fixed; right: 10px; bottom: 8px; opacity: .5; pointer-events: none; }
+  #hint a { color: inherit; pointer-events: auto; }
+  #err { position: fixed; left: 10px; top: 44px; color: #ff7d7d; white-space: pre-wrap; }
+  canvas { display: block; width: 100vw; height: calc(100vh - 42px); }
+</style>
+</head>
+<body>
+<div id="bar">
+  <select id="pack"></select>
+  <button id="prev" title="previous present sprite">&#8592;</button>
+  <button id="next" title="next present sprite">&#8594;</button>
+  <input id="idx" type="number" min="0" placeholder="index">
+  <button id="go">go</button>
+  <button id="play" title="cycle next 8 present sprites at 8 fps">&#9654;</button>
+  <button id="tc" class="on" title="toggle pivot crosshair (G)">G</button>
+  <button id="tm" title="toggle mask overlay (M)">M</button>
+  <button id="tb" title="toggle background flat/checker (B)">B</button>
+</div>
+<canvas id="cv"></canvas>
+<div id="hud"></div>
+<div id="hint">&#8592;&#8594; step &#183; G/M/B toggles &#183; &#9654; fake-anim &#183; <a href="/map.html">map</a></div>
+<div id="err"></div>
+<script type="module" src="/apps/web/demo.js"></script>
+</body>
+</html>
