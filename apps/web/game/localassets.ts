@@ -9,6 +9,8 @@
 // a FileSystemDirectoryHandle tree, DecompressionStream('deflate'), OffscreenCanvas PNG encoding, IDB.
 import { buildBundle } from './localsource.ts';
 import type { DirListing, DirTree, LocalBundle, Progress } from './localsource.ts';
+import { zipTree } from './pack.ts';
+import type { ZipTree } from './pack.ts';
 
 const DB_NAME = 'kam-web-local';
 const DB_VERSION = 1;
@@ -16,6 +18,9 @@ const FILE_STORE = 'files';
 const META_STORE = 'meta';
 const META_KEY = 'bundle';
 const HANDLE_KEY = 'folder';
+/** The KaM data pack (.zip) itself, kept as it was: its maps are then read out of it on demand instead of
+ *  being unpacked into the database (a pack holds ~90 MB of map files, the bundle only ~20 MB of atlases). */
+const PACK_KEY = 'pack';
 
 export type LocalStatus = 'none' | 'building' | 'ready' | 'error';
 
@@ -41,6 +46,9 @@ let db: IDBDatabase | null = null;
 let memory = new Map<string, Uint8Array>();
 let meta: Meta | null = null;
 let rootHandle: FileSystemDirectoryHandle | null = null;
+/** Set when the assets came from a KaM data pack instead of a folder: the archive and a tree over it. */
+let packBytes: Uint8Array | null = null;
+let packTree: ZipTree | null = null;
 let shimInstalled = false;
 
 /** The routes this module answers instead of the network; anything else goes to the real fetch. */
@@ -206,20 +214,32 @@ async function bundleFile(url: string): Promise<Uint8Array | null> {
   return bytes;
 }
 
-/** The map files are not stored in the bundle: they are read from the picked folder when a map is played. */
+/**
+ * The map files are not stored in the bundle: they are read from the picked folder, or out of the data pack,
+ * when a map is played.
+ */
 async function mapFile(url: string): Promise<Uint8Array> {
   const hit = memory.get(url);
   if (hit !== undefined) return hit;
+  const stored = await bundleFile(url);
+  if (stored !== null) return stored;
   const parts = url.split('/').filter((p) => p !== '');
   // /mapfile/<kind>/<name>/<ext>
   const kind = parts[1] ?? '';
   const name = parts[2] ?? '';
   const ext = parts[3] ?? 'map';
+  const relPath = `${kind}/${name}/${name}.${ext}`;
+  if (packTree !== null) {
+    const bytes = await packTree.read(relPath);
+    if (bytes === null) throw new Error(`not in the data pack: ${relPath}`);
+    memory.set(url, bytes);
+    return bytes;
+  }
   const tree = rootHandle === null ? null : handleTree(rootHandle);
   if (tree === null) throw new Error('the KaM folder is not connected any more: choose it again');
   let bytes: Uint8Array | null = null;
   try {
-    bytes = await tree.read(`${kind}/${name}/${name}.${ext}`);
+    bytes = await tree.read(relPath);
   } catch (err) {
     throw new Error(`the KaM folder needs permission again (${message(err)}): click "Reconnect KaM folder"`);
   }
@@ -260,13 +280,21 @@ function stateFromMeta(status: LocalStatus, detail: string): LocalState {
 export async function attachLocalAssets(): Promise<LocalState> {
   try {
     const stored = await tx<Meta | undefined>(META_STORE, 'readonly', (s) => s.get(META_KEY));
-    if (stored === undefined) return stateFromMeta('none', 'assets come from the server (or pick your KaM folder)');
+    if (stored === undefined) return stateFromMeta('none', 'assets come from the server (or use your KaM folder / a data pack)');
     meta = stored;
-    rootHandle = (await tx<FileSystemDirectoryHandle | undefined>(META_STORE, 'readonly', (s) => s.get(HANDLE_KEY))) ?? null;
+    const pack = await tx<Uint8Array | ArrayBuffer | undefined>(META_STORE, 'readonly', (s) => s.get(PACK_KEY));
+    if (pack !== undefined) {
+      // the pack is kept whole, so its maps are read straight out of it when a game starts
+      packBytes = pack instanceof Uint8Array ? pack : new Uint8Array(pack);
+      packTree = zipTree(packBytes);
+    } else {
+      rootHandle = (await tx<FileSystemDirectoryHandle | undefined>(META_STORE, 'readonly', (s) => s.get(HANDLE_KEY))) ?? null;
+    }
     const count = await tx<number>(FILE_STORE, 'readonly', (s) => s.count());
     meta.files = count;
     installShim();
-    return stateFromMeta('ready', `your KaM folder (${count} files, built ${stored.builtAt.slice(0, 16).replace('T', ' ')})`);
+    const from = pack !== undefined ? `data pack ${stored.folder}` : `your KaM folder ${stored.folder}`;
+    return stateFromMeta('ready', `${from} (${count} files, built ${stored.builtAt.slice(0, 16).replace('T', ' ')})`);
   } catch (err) {
     return stateFromMeta('error', message(err));
   }
@@ -302,6 +330,34 @@ export async function useKaMFolder(onProgress: Progress = () => {}): Promise<Loc
   }
 }
 
+/**
+ * The same build, but from a KaM data pack (.zip) instead of a folder: one file, one click, no folder
+ * picker and nothing to extract. Works from a plain <input type=file>, which every locked-down machine
+ * allows (docs/WORK-PC.md).
+ */
+export async function useKaMPack(file: File, onProgress: Progress = () => {}): Promise<LocalState> {
+  try {
+    onProgress(`reading ${file.name} (${(file.size / 1048576).toFixed(1)} MB) ...`);
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const tree = zipTree(bytes);
+    if (tree.entries.length === 0) return stateFromMeta('error', `${file.name} has no files in it`);
+    const bundle = await buildBundle({ tree, inflate, encodePng }, (m) => {
+      onProgress(m);
+    });
+    onProgress('saving the pack in this browser ...');
+    meta = await putBundle(bundle, file.name);
+    await tx<undefined>(META_STORE, 'readwrite', (s) => s.put(bytes, PACK_KEY) as unknown as IDBRequest<undefined>);
+    packBytes = bytes;
+    packTree = tree;
+    rootHandle = null;
+    memory = new Map(bundle.files);
+    installShim();
+    return stateFromMeta('ready', `${file.name} (${bundle.files.size} files, ${bundle.maps} maps)`);
+  } catch (err) {
+    return stateFromMeta('error', message(err));
+  }
+}
+
 /** Ask again for read permission on the stored folder (a click is required by the browser). */
 export async function reconnectLocalAssets(): Promise<LocalState> {
   try {
@@ -329,12 +385,15 @@ export async function forgetLocalAssets(): Promise<LocalState> {
     t.objectStore(FILE_STORE).clear();
     t.objectStore(META_STORE).delete(META_KEY);
     t.objectStore(META_STORE).delete(HANDLE_KEY);
+    t.objectStore(META_STORE).delete(PACK_KEY);
     t.oncomplete = () => resolve();
     t.onerror = () => reject(new Error('indexeddb: could not forget the bundle'));
   });
   memory = new Map();
   meta = null;
   rootHandle = null;
+  packBytes = null;
+  packTree = null;
   return stateFromMeta('none', 'the stored bundle was removed; reload the page to use the server assets');
 }
 

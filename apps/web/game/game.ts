@@ -16,7 +16,7 @@ import { createUi } from '../ui/ui.ts';
 import type { GameUi, PlayView } from '../ui/ui.ts';
 import { installGameTest } from '../ui/gametest.ts';
 import { createLobby } from './lobby.ts';
-import { attachLocalAssets, forgetLocalAssets, reconnectLocalAssets, useKaMFolder } from './localassets.ts';
+import { attachLocalAssets, forgetLocalAssets, reconnectLocalAssets, useKaMFolder, useKaMPack } from './localassets.ts';
 import type { LocalState } from './localassets.ts';
 import type { Lobby } from './lobby.ts';
 
@@ -76,6 +76,8 @@ const backbtn = document.getElementById('backbtn')! as HTMLButtonElement;
 // (a static host, or a friend's browser). Attached before the map list is fetched, so /maps, /defines,
 // /mapfile, /mission and /out/atlas are answered from the bundle when one is stored.
 const localFolderBtn = document.getElementById('localfolder')! as HTMLButtonElement;
+const localPackBtn = document.getElementById('localpack')! as HTMLButtonElement;
+const localPackInput = document.getElementById('localpackinput')! as HTMLInputElement;
 const localReconnectBtn = document.getElementById('localreconnect')! as HTMLButtonElement;
 const localForgetBtn = document.getElementById('localforget')! as HTMLButtonElement;
 const localStatusEl = document.getElementById('localstatus')!;
@@ -87,6 +89,7 @@ function renderLocal(state: LocalState): void {
   localStatusEl.classList.toggle('bad', state.status === 'error');
   localFolderBtn.textContent = state.status === 'ready' ? 'Change KaM folder' : 'Use my KaM folder';
   localFolderBtn.disabled = state.status === 'building';
+  localPackBtn.disabled = state.status === 'building';
   localReconnectBtn.classList.toggle('hide', state.status !== 'ready');
   localForgetBtn.classList.toggle('hide', state.status === 'none' || state.status === 'building');
 }
@@ -97,25 +100,37 @@ async function refreshMapList(): Promise<void> {
   renderMapList(maps);
 }
 
-localFolderBtn.addEventListener('click', () => {
-  void (async () => {
-    const started = performance.now();
-    renderLocal({ status: 'building', detail: 'reading your KaM folder ...', files: 0, maps: 0, packs: 0, builtAt: '', folder: '' } as LocalState);
-    const state = await useKaMFolder((m) => {
-      localStatusEl.textContent = m;
-      localStatusEl.classList.remove('bad');
-    });
-    if (state.status === 'ready') {
-      const seconds = ((performance.now() - started) / 1000).toFixed(1);
-      state.detail = `${state.detail} in ${seconds} s - reloading the page with your assets`;
-      renderLocal(state);
-      // The renderer boots straight into the atlases (play.ts), so it needs them before its own boot:
-      // reload now that the bundle is stored, and every request is then answered from the folder.
-      setTimeout(() => location.reload(), 500);
-      return;
-    }
+/**
+ * Build the asset bundle from wherever it comes from (the folder picker or a data pack), then reload: the
+ * renderer boots straight into the atlases (play.ts), so it needs them stored before its own boot.
+ */
+async function buildAssets(load: (onProgress: (message: string) => void) => Promise<LocalState>): Promise<void> {
+  const started = performance.now();
+  renderLocal({ status: 'building', detail: 'reading your KaM assets ...', files: 0, maps: 0, packs: 0, builtAt: '', folder: '' } as LocalState);
+  const state = await load((m) => {
+    localStatusEl.textContent = m;
+    localStatusEl.classList.remove('bad');
+  });
+  if (state.status === 'ready') {
+    const seconds = ((performance.now() - started) / 1000).toFixed(1);
+    state.detail = `${state.detail} in ${seconds} s - reloading the page with your assets`;
     renderLocal(state);
-  })();
+    setTimeout(() => location.reload(), 500);
+    return;
+  }
+  renderLocal(state);
+}
+
+localFolderBtn.addEventListener('click', () => {
+  void buildAssets((p) => useKaMFolder(p));
+});
+
+// A plain file input: allowed on machines that refuse the folder picker, and nothing to extract first.
+localPackBtn.addEventListener('click', () => localPackInput.click());
+localPackInput.addEventListener('change', () => {
+  const file = localPackInput.files?.[0];
+  if (file === undefined) return;
+  void buildAssets((p) => useKaMPack(file, p));
 });
 
 localReconnectBtn.addEventListener('click', () => {

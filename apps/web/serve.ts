@@ -39,9 +39,11 @@ const WEB_TS_DIR = join(ROOT, 'apps', 'web');
 const WEB_JS_DIR = join(ROOT, 'out', 'web');
 const TSC = join(ROOT, 'node_modules', 'typescript', 'bin', 'tsc');
 const WEB_JS_ROUTE = /^\/apps\/web\/([A-Za-z0-9_-]+)\.js$/;
-// M6: `net` joined the module groups — packages/net/*.js is emitted by the game graph (apps/web/game imports
+// M6: `net` joined the module groups - packages/net/*.js is emitted by the game graph (apps/web/game imports
 // browserclient.ts), not by the viewer graphs, which is why the /packages/net/ route builds the game graph.
-const MODULE_ROUTE = /^\/packages\/(sim|assets|mission|map|net)\/([A-Za-z0-9_-]+)\.js$/;
+// A8: `archive` (packages/archive/zip.js) is the zip reader/writer: the game graph emits it too, because the
+// page imports it (localsource/pack.ts) for reading a KaM data pack.
+const MODULE_ROUTE = /^\/packages\/(sim|assets|mission|map|net|archive)\/([A-Za-z0-9_-]+)\.js$/;
 const DEFINES_ROUTE = /^\/defines\/(tiles\.json|mapelem\.dat|unit\.dat|houses\.dat)$/;
 const MAPFILE_ROUTE = /^\/mapfile\/([^/]+)\/([^/]+)\/(map|dat|txt)$/;
 const DEFINES_DIR = process.env.KAM_DATA ?? 'C:\\Users\\me\\Desktop\\KaM Remake\\KaM Remake Beta r15472\\data\\defines';
@@ -211,7 +213,7 @@ function buildGraphs(): void {
 // like the viewer graphs: a tsc run per request blocked the one server thread for 4-30 s per module (measured).
 const GAME_ENTRY = 'apps/web/game/game.ts';
 const GAME_OUT = join(WEB_JS_DIR, 'apps', 'web', 'game', 'game.js');
-const GAME_SRC_DIRS = ['apps/web/game', 'apps/web/ui', 'packages/sim', 'packages/map', 'packages/assets', 'packages/mission', 'packages/net'];
+const GAME_SRC_DIRS = ['apps/web/game', 'apps/web/ui', 'packages/archive', 'packages/sim', 'packages/map', 'packages/assets', 'packages/mission', 'packages/net'];
 
 /** Newest .ts mtime under a directory (relative to ROOT), recursive. */
 function newestTs(rel: string): number {
@@ -306,7 +308,7 @@ const server = createServer((req, res) => {
   const mod = path.match(MODULE_ROUTE);
   if (mod !== null) {
     try {
-      if (mod[1] === 'net') buildGameGraph(); // M6: packages/net/*.js comes from the game graph
+      if (mod[1] === 'net' || mod[1] === 'archive') buildGameGraph(); // M6/A8: net and archive come from the game graph
       else buildGraphs();
       const abs = join(WEB_JS_DIR, 'packages', mod[1], `${mod[2]}.js`);
       if (!existsSync(abs)) {
@@ -449,6 +451,7 @@ function check(): void {
     ['out/web/apps/web/mapdemo.js', MAPDEMO_OUT],
     ['out/web/apps/web/mapread.js', join(WEB_JS_DIR, 'apps', 'web', 'mapread.js')],
     ['out/web/apps/web/game/game.js', GAME_OUT],
+    ['out/web/packages/archive/zip.js', join(WEB_JS_DIR, 'packages', 'archive', 'zip.js')],
   ];
   for (const [label, abs] of files) {
     if (!existsSync(abs)) fails.push(`missing ${label} (${abs})`);

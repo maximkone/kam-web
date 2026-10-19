@@ -82,12 +82,19 @@ traffic goes through this machine. Fine for a game night; not a site.
   `apps/web/game/lobby.ts`). An https page must use `wss://`, never `ws://`.
 - **Licence**: this repo is AGPL-3.0; a public deployment must offer its source, and must not ship KaM data.
 
-## 4b. What a browser-only check still cannot do
+## 4b. What a browser-only check can and cannot do
 
-The folder picker needs a user gesture, so no automated check can click it. `npm run localcheck` covers the
-same builder end to end in node (byte-identical atlases, identical map list), and the browser-only pieces
-left unverified by machine are: `showDirectoryPicker`, `DecompressionStream('deflate')` as the inflate, and
-`OffscreenCanvas` PNG encoding. Clicking "Use my KaM folder" in the exported page once is the manual proof.
+The folder picker needs a user gesture, so no automated check can click it: `showDirectoryPicker` stays
+unverified by machine, and so does clicking "Use my KaM folder" in the exported page (that click is the
+manual proof). `npm run localcheck` covers the same builder end to end in node (byte-identical atlases,
+identical map list).
+
+The **data pack** path has no such gap: a plain `<input type=file>` can be driven over CDP, so
+`node tools/uicheck/b4.ts --check` imports the real archive in a real browser and insists on the outcome -
+the page names the pack, its map list is the pack's own list (not the server's), a map's bytes come out of
+the archive, the atlas reaches the renderer, and a match against the AI ticks and draws real art. That check
+also exercises `DecompressionStream('deflate-raw')` and `OffscreenCanvas` PNG encoding, which the folder path
+used to leave to a human (see docs/WORK-PC.md).
 
 ## 5. Known limits of a room (say this before a game night)
 
