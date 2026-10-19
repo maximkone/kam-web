@@ -61,22 +61,33 @@ Then the page's `Relay` field must be set by hand to `wss://<the relay tunnel's 
 https may not open `ws://`). The address changes on every restart, the PC must stay on, and every player's
 traffic goes through this machine. Fine for a game night; not a site.
 
-## 4. A public site (GitHub Pages and a relay host) — not built yet
+## 4. A public site (GitHub Pages and a relay host)
 
-What the code already allows and what is missing:
-
-- **Client on GitHub Pages** (free, https, custom domain): needs a static build. Today the JS is compiled
-  per request by `apps/web/serve.ts`, so a build step must emit the same `out/web` graph plus the HTML/CSS
-  to a publishable folder, with no server routes.
-- **Art, maps, defines**: these are the KaM install's (`out/atlas` is rendered from `Sprites/*.rxx`), so they
-  cannot be published. A public page must ask the player for their own `KaM Remake` folder once
-  (`showDirectoryPicker`), read `data/defines`, `Maps`, `MapsMP` and the sprite packs from it, build the
-  atlases in a Web Worker (the decoders in `packages/assets/{rxx,atlas,png}.ts` are already browser-safe;
-  `tools/import/cli.ts` is the Node-only glue) and keep the result in IndexedDB. This is the big piece.
-- **Relay**: GitHub Pages cannot run a WebSocket server. A free Node host (Render free web service, Fly.io,
-  Koyeb) runs `apps/server/relay.ts` as it is; its `wss://` address becomes `RELAY_PUBLIC` in
-  `apps/web/game/lobby.ts`, which is what an https page uses (`wss://`, never `ws://`).
+- **Client on GitHub Pages** (free, https, custom domain): the code is ready — `node apps/web/serve.ts --export dist`
+  (`npm run export`) writes the publishable client (71 files, 1.81 MB; no asset ever lands there) and
+  `.github/workflows/pages.yml` builds and deploys it on every push to `master`, at
+  `https://maximkone.github.io/kam-web/` (a subpath, which the exported HTML's relative paths handle). The
+  page then asks each visitor for their own KaM Remake folder once — nothing is republished.
+- **Art, maps, defines stay on the visitor's disk.** "Use my KaM folder" (`apps/web/game/localassets.ts`)
+  opens `showDirectoryPicker`, reads `data/Sprites/*.rxx`, `data/defines`, `Tutorials` and the `Maps`/
+  `MapsMP` folders, builds the atlases in the page (`OffscreenCanvas`), stores ~15 MB of PNGs and JSON in
+  IndexedDB, and installs a fetch shim that answers `/defines/*`, `/maps`, `/mapfile/*`, `/mission/*` and
+  `/out/atlas/*` from that bundle (map files are read from the folder when a map is played, not copied).
+  The page then reloads so the renderer boots with the assets in place. Nothing is uploaded anywhere, and
+  the same code path is verified against the dev server's own output by `npm run localcheck` (the atlases
+  come out byte-identical, all 243 map entries equal). The folder picker needs a click (a browser rule).
+- **Relay**: GitHub Pages cannot run a WebSocket server. A free Node host (Render free web service, Fly.io)
+  runs `apps/server/relay.ts` as it is; pass its `wss://` address to the export
+  (`--relay wss://host/relay`), which writes `relay-config.js` (read by `defaultRelayUrl` in
+  `apps/web/game/lobby.ts`). An https page must use `wss://`, never `ws://`.
 - **Licence**: this repo is AGPL-3.0; a public deployment must offer its source, and must not ship KaM data.
+
+## 4b. What a browser-only check still cannot do
+
+The folder picker needs a user gesture, so no automated check can click it. `npm run localcheck` covers the
+same builder end to end in node (byte-identical atlases, identical map list), and the browser-only pieces
+left unverified by machine are: `showDirectoryPicker`, `DecompressionStream('deflate')` as the inflate, and
+`OffscreenCanvas` PNG encoding. Clicking "Use my KaM folder" in the exported page once is the manual proof.
 
 ## 5. Known limits of a room (say this before a game night)
 

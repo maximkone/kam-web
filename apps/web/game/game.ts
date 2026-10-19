@@ -16,6 +16,8 @@ import { createUi } from '../ui/ui.ts';
 import type { GameUi, PlayView } from '../ui/ui.ts';
 import { installGameTest } from '../ui/gametest.ts';
 import { createLobby } from './lobby.ts';
+import { attachLocalAssets, forgetLocalAssets, reconnectLocalAssets, useKaMFolder } from './localassets.ts';
+import type { LocalState } from './localassets.ts';
 import type { Lobby } from './lobby.ts';
 
 const MAP_LIST_URL = '/maps';
@@ -68,6 +70,59 @@ const endtitle = document.getElementById('endtitle')!;
 const endreason = document.getElementById('endreason')!;
 const endstats = document.getElementById('endstats')!;
 const backbtn = document.getElementById('backbtn')! as HTMLButtonElement;
+
+// ---- Local KaM folder (docs/DEPLOY.md 4) -------------------------------------
+// The player's own install as the asset source: the same page then runs with no asset server at all
+// (a static host, or a friend's browser). Attached before the map list is fetched, so /maps, /defines,
+// /mapfile, /mission and /out/atlas are answered from the bundle when one is stored.
+const localFolderBtn = document.getElementById('localfolder')! as HTMLButtonElement;
+const localReconnectBtn = document.getElementById('localreconnect')! as HTMLButtonElement;
+const localForgetBtn = document.getElementById('localforget')! as HTMLButtonElement;
+const localStatusEl = document.getElementById('localstatus')!;
+
+function renderLocal(state: LocalState): void {
+  localStatusEl.textContent = state.detail;
+  localStatusEl.classList.toggle('bad', state.status === 'error');
+  localFolderBtn.textContent = state.status === 'ready' ? 'Change KaM folder' : 'Use my KaM folder';
+  localFolderBtn.disabled = state.status === 'building';
+  localReconnectBtn.classList.toggle('hide', state.status !== 'ready');
+  localForgetBtn.classList.toggle('hide', state.status === 'none' || state.status === 'building');
+}
+
+async function refreshMapList(): Promise<void> {
+  const maps = await loadMapList();
+  (window as any).__mapList = maps;
+  renderMapList(maps);
+}
+
+localFolderBtn.addEventListener('click', () => {
+  void (async () => {
+    const started = performance.now();
+    renderLocal({ status: 'building', detail: 'reading your KaM folder ...', files: 0, maps: 0, packs: 0, builtAt: '', folder: '' } as LocalState);
+    const state = await useKaMFolder((m) => {
+      localStatusEl.textContent = m;
+      localStatusEl.classList.remove('bad');
+    });
+    if (state.status === 'ready') {
+      const seconds = ((performance.now() - started) / 1000).toFixed(1);
+      state.detail = `${state.detail} in ${seconds} s - reloading the page with your assets`;
+      renderLocal(state);
+      // The renderer boots straight into the atlases (play.ts), so it needs them before its own boot:
+      // reload now that the bundle is stored, and every request is then answered from the folder.
+      setTimeout(() => location.reload(), 500);
+      return;
+    }
+    renderLocal(state);
+  })();
+});
+
+localReconnectBtn.addEventListener('click', () => {
+  void reconnectLocalAssets().then(renderLocal);
+});
+
+localForgetBtn.addEventListener('click', () => {
+  void forgetLocalAssets().then(() => location.reload());
+});
 
 // ---- Setup screen ----
 async function loadMapList(): Promise<MapInfoView[]> {
@@ -394,7 +449,15 @@ function setTopButtons(singlePlayer: boolean): void {
 
 // ---- Boot ----
 async function boot(): Promise<void> {
-  const maps = await loadMapList();
+  renderLocal(await attachLocalAssets());
+  let maps: MapInfoView[] = [];
+  try {
+    maps = await loadMapList();
+  } catch (err) {
+    // A static host has no /maps route: the map list needs the player's own KaM folder (docs/DEPLOY.md 4).
+    localStatusEl.textContent = `no assets yet (${err instanceof Error ? err.message : String(err)}): click "Use my KaM folder"`;
+    localStatusEl.classList.add('bad');
+  }
   (window as any).__mapList = maps;
   renderMapList(maps);
   renderSlots();

@@ -18,19 +18,12 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { readMapHeader } from './map.ts';
+import { parseTxtSmallDesc } from './smalldesc.ts';
 import { MAX_HANDS, parseMissionInfo } from '../mission/mission.ts';
 import type { MissionInfo } from '../mission/mission.ts';
+import type { MapInfo } from './mapinfo.ts';
 
-export interface MapInfo {
-  kind: string;            // 'Maps' | 'MapsMP' | ...
-  name: string;            // folder name
-  mapPath: string; datPath: string; txtPath: string | null;
-  mapX: number; mapY: number; remake: boolean; rev: number;
-  maxPlayers: number; canBeHuman: boolean[]; classicAI: boolean[]; advancedAI: boolean[];
-  aiStart: { x: number; y: number }[];
-  tactic: boolean; smallDesc: string; // '' when no .txt (or no SmallDesc line)
-  valid: boolean;          // map+dat present and maxPlayers > 0
-}
+export type { MapInfo } from './mapinfo.ts';
 
 function isFile(path: string): boolean {
   try {
@@ -60,14 +53,9 @@ function compareNames(a: string, b: string): number {
 /**
  * The `SmallDesc` value of a .txt (KM_Maps.pas 1210–1213): the line after the line that reads
  * "SmallDesc" (case-insensitive); '' when there is no such line or no line after it.
+ * Re-exported from ./smalldesc.ts so that the browser-safe reader and this scanner share one copy.
  */
-export function parseTxtSmallDesc(text: string): string {
-  const lines = text.replace(/^\uFEFF/, '').split(/\r\n|\n|\r/);
-  for (let i = 0; i + 1 < lines.length; i++) {
-    if (lines[i].toLowerCase() === 'smalldesc') return lines[i + 1];
-  }
-  return '';
-}
+export { parseTxtSmallDesc };
 
 /** Read a .txt as UTF-8; on invalid UTF-8 fall back to latin1 (KM_Maps.pas 1178–1188). */
 function readTxt(path: string): string {

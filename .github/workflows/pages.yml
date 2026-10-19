@@ -1,0 +1,52 @@
+# pages.yml - publish the client to GitHub Pages (docs/DEPLOY.md section 4).
+#
+# Only our own code is published: the export is the compiled client (71 files, ~1.8 MB) with no KaM art or
+# maps, because the page reads those from the visitor's own KaM Remake folder (apps/web/game/localassets.ts).
+# Nothing under out/ is committed; the workflow builds it here and uploads the artifact.
+#
+# The site lands at https://<owner>.github.io/<repo>/ - a subpath - so the exported HTML uses relative
+# script paths (apps/web/serve.ts exportSite) and the asset routes are answered by the in-page shim.
+#
+# Multiplayer needs a relay; when one is hosted (a free Node host, docs/DEPLOY.md 4) pass it here:
+#   node apps/web/serve.ts --export dist --relay wss://<relay-host>
+# Without it relay-config.js is empty and the panel points at a relay on the visitor's own host.
+name: pages
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm ci --no-audit --no-fund
+      - run: node apps/web/serve.ts --export dist
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

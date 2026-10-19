@@ -39,7 +39,15 @@ export const MP_AI_START = 'normal';
 export const RELAY_PUBLIC = '';
 const RELAY_PORT = 8130;
 
+/** The exported site writes this global (relay-config.js); it is the hosted relay a public page must use. */
+function configuredRelay(): string {
+  const v = (globalThis as unknown as { __KAM_RELAY_DEFAULT?: unknown }).__KAM_RELAY_DEFAULT;
+  return typeof v === 'string' ? v.trim() : '';
+}
+
 export function defaultRelayUrl(loc: { protocol: string; hostname: string } = location): string {
+  const configured = configuredRelay();
+  if (configured !== '') return configured; // the exported site names its hosted relay; it wins everywhere
   const local = loc.hostname === 'localhost' || loc.hostname === '127.0.0.1' || loc.hostname === '[::1]';
   if (local || loc.hostname === '') return `ws://127.0.0.1:${RELAY_PORT}`;
   if (loc.protocol === 'http:') return `ws://${loc.hostname}:${RELAY_PORT}`;

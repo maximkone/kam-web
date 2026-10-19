@@ -3,16 +3,24 @@
 //   node tools/import/cli.ts --install "<KaM Remake root or data\Sprites dir>" [--out out] [--packs Units,Tileset] [--check]
 import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { buildAtlas } from '../../packages/assets/atlas.ts';
-import { decodeRxx } from '../../packages/assets/rxx.ts';
+import { buildAtlasData } from '../../packages/assets/atlas.ts';
+import { decodeRxxFile, writeAtlas } from './write.ts';
 import type { RxxPack } from '../../packages/assets/rxx.ts';
 
 const DEFAULT_PACKS = ['Units', 'Tileset', 'Houses', 'Trees', 'GUI', 'GUIMain'];
-// Expected values for the reference install's Units.rxx (M0-SPIKE.md section 3 check).
-// Deviation, verified against the raw payload bytes: sprite 0 is 15x16 pivot(-1,-28), not (-1,-1)
-// (head 0f001000 ffffffff e4ffffff; no 15x16 sprite in Units.rxx/Units_a.rxx has pivot(-1,-1)).
-// Sprite 64 (33x40 pivot(-13,-35) mask=yes) matches the spec exactly.
-const CHECK_EXPECT = { present: 8688, sprite0: { w: 15, h: 16, px: -1, py: -28 }, sprite64: { w: 33, h: 40, px: -13, py: -35 } };
+// Expected values for the reference Units.rxx (M0-SPIKE.md section 3). Two profiles, because the M0
+// install's Units.rxx is an RXX0 container with 8688 present sprites while the r15472 install's is RXX2
+// with 8696 (same 9400 declared, and sprite 0 and 64 are identical in both, so a decoder regression still
+// fails). Verified 2026-10-19: the r15472 file starts with "RXX2"; `out/atlas` had been built from the
+// older RXX0 file and was rebuilt then.
+const CHECK_EXPECT: { format: string; present: number }[] = [
+  { format: 'rxx0', present: 8688 },
+  { format: 'rxx2', present: 8696 },
+];
+const CHECK_SPRITES = {
+  sprite0: { w: 15, h: 16, px: -1, py: -28 },
+  sprite64: { w: 33, h: 40, px: -13, py: -35 },
+};
 
 interface Options {
   install: string;
@@ -75,18 +83,21 @@ function findSpritesDir(install: string): string {
 function checkProblems(units: RxxPack): string[] {
   const problems: string[] = [];
   if (units.leftover !== 0) problems.push(`leftover bytes = ${units.leftover}, expected 0`);
-  if (units.sprites.length !== CHECK_EXPECT.present) {
-    problems.push(`present sprites = ${units.sprites.length}, expected ${CHECK_EXPECT.present}`);
+  const profile = CHECK_EXPECT.find((p) => p.format === units.format);
+  if (profile === undefined) {
+    problems.push(`format ${units.format} is not one of the known profiles (${CHECK_EXPECT.map((p) => p.format).join(', ')})`);
+  } else if (units.sprites.length !== profile.present) {
+    problems.push(`present sprites = ${units.sprites.length}, expected ${profile.present} for ${profile.format}`);
   }
   const s0 = units.sprites.find((s) => s.index === 0);
-  const e0 = CHECK_EXPECT.sprite0;
+  const e0 = CHECK_SPRITES.sprite0;
   if (s0 === undefined) problems.push('sprite 0 missing');
   else {
     if (s0.w !== e0.w || s0.h !== e0.h) problems.push(`sprite 0 is ${s0.w}x${s0.h}, expected ${e0.w}x${e0.h}`);
     if (s0.px !== e0.px || s0.py !== e0.py) problems.push(`sprite 0 pivot (${s0.px},${s0.py}), expected (${e0.px},${e0.py})`);
   }
   const s64 = units.sprites.find((s) => s.index === 64);
-  const e64 = CHECK_EXPECT.sprite64;
+  const e64 = CHECK_SPRITES.sprite64;
   if (s64 === undefined) problems.push('sprite 64 missing');
   else {
     if (s64.w !== e64.w || s64.h !== e64.h) problems.push(`sprite 64 is ${s64.w}x${s64.h}, expected ${e64.w}x${e64.h}`);
@@ -110,8 +121,8 @@ function main(): void {
   for (const name of opts.packs) {
     const file = join(spritesDir, `${name}.rxx`);
     if (!existsSync(file)) throw new Error(`pack file not found: ${file}`);
-    const decoded = decodeRxx(file, name);
-    const result = buildAtlas(decoded, opts.out);
+    const decoded = decodeRxxFile(file, name);
+    const result = writeAtlas(buildAtlasData(decoded), opts.out);
     packs += 1;
     sprites += decoded.sprites.length;
     sheets += result.sheets;
@@ -132,7 +143,7 @@ function main(): void {
         for (const p of problems) console.error(`CHECK FAIL: ${p}`);
         process.exitCode = 1;
       } else {
-        console.log('CHECK PASS');
+        console.log(`CHECK PASS (Units format=${units.format} present=${units.sprites.length})`);
       }
     }
   }

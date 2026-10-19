@@ -1,12 +1,12 @@
-// atlas.ts — shelf packer + manifest writer: decoded RXX packs -> PNG sheets + JSON.
+// atlas.ts — shelf packer + manifest builder: decoded RXX packs -> sheet pixels + JSON manifest. Pure:
+// no node builtins, so the browser packs the same sheets in a worker (docs/DEPLOY.md section 4) and turns
+// them into PNGs with a canvas; the node side (`toPng` + writing files) is tools/import/write.ts.
+//
 // Output contract: docs/M0-SPIKE.md section 3. Sheets are 2048 wide, max 4096 tall,
 // sprites keep index order, a full sheet is sealed and a new one opened.
 // Masks go to their own sheets; the mask byte is encoded as alpha with RGB (255,0,0) where set
 // (pixels with mask 0 stay all-zero/transparent), so "draw the mask sheet as red where set"
 // is a plain alpha-blended overlay.
-import { mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { toPng } from './png.ts';
 import type { RxxPack } from './rxx.ts';
 
 export const SHEET_W = 2048;
@@ -42,11 +42,15 @@ export interface AtlasManifest {
   sprites: AtlasSpriteEntry[];
 }
 
-export interface AtlasResult {
-  sheets: number;
-  maskSheets: number;
-  bytes: number;
-  jsonPath: string;
+/** One sealed sheet's pixels (RGBA8, row-major) plus the name the manifest refers to it by. */
+export interface AtlasSheetData extends AtlasSheet {
+  rgba: Uint8Array;
+}
+
+export interface AtlasBuild {
+  manifest: AtlasManifest;
+  sheets: AtlasSheetData[];
+  maskSheets: AtlasSheetData[];
 }
 
 interface Shelf {
@@ -57,12 +61,12 @@ interface Shelf {
 }
 
 interface Sheet {
-  data: Buffer;
+  data: Uint8Array;
   shelf: Shelf;
 }
 
 function newSheet(): Sheet {
-  return { data: Buffer.alloc(SHEET_W * SHEET_H * 4), shelf: { penX: 0, penY: 0, shelfH: 0, usedH: 0 } };
+  return { data: new Uint8Array(SHEET_W * SHEET_H * 4), shelf: { penX: 0, penY: 0, shelfH: 0, usedH: 0 } };
 }
 
 /** Place a w x h sprite on the sheet's current shelf; null when a fresh sheet is needed first. */
@@ -81,18 +85,18 @@ function place(sheet: Sheet, w: number, h: number): { x: number; y: number } | n
   return at;
 }
 
-function blit(sheet: Sheet, x: number, y: number, w: number, h: number, rgba: Buffer): void {
+function blit(sheet: Sheet, x: number, y: number, w: number, h: number, rgba: Uint8Array): void {
   for (let row = 0; row < h; row++) {
-    rgba.copy(sheet.data, ((y + row) * SHEET_W + x) * 4, row * w * 4, (row + 1) * w * 4);
+    sheet.data.set(rgba.subarray(row * w * 4, (row + 1) * w * 4), ((y + row) * SHEET_W + x) * 4);
   }
 }
 
-function blitMask(sheet: Sheet, x: number, y: number, w: number, h: number, mask: Buffer): void {
+function blitMask(sheet: Sheet, x: number, y: number, w: number, h: number, mask: Uint8Array): void {
   for (let row = 0; row < h; row++) {
     let d = ((y + row) * SHEET_W + x) * 4;
     let s = row * w;
     for (let col = 0; col < w; col++, d += 4, s++) {
-      const a = mask[s];
+      const a = mask[s]!;
       if (a !== 0) {
         sheet.data[d] = 255; // red
         sheet.data[d + 3] = a;
@@ -101,27 +105,18 @@ function blitMask(sheet: Sheet, x: number, y: number, w: number, h: number, mask
   }
 }
 
-/** Write a decoded pack into `<outDir>/atlas/<Pack>.json` + `<Pack>.<n>.png` (+ `<Pack>.m<n>.png` masks). */
-export function buildAtlas(pack: RxxPack, outDir: string): AtlasResult {
-  const dir = join(outDir, 'atlas');
-  mkdirSync(dir, { recursive: true });
-
-  const sheets: AtlasSheet[] = [];
-  const maskSheets: AtlasSheet[] = [];
+/** Pack a decoded pack into sheets + manifest (`<Pack>.json`, `<Pack>.<n>.png`, `<Pack>.m<n>.png`). */
+export function buildAtlasData(pack: RxxPack): AtlasBuild {
+  const sheets: AtlasSheetData[] = [];
+  const maskSheets: AtlasSheetData[] = [];
   const entries: AtlasSpriteEntry[] = [];
-  let bytes = 0;
 
   let dataSheet: Sheet | null = null;
   let maskSheet: Sheet | null = null;
 
-  function seal(sheet: Sheet, file: string, into: AtlasSheet[]): void {
+  function seal(sheet: Sheet, file: string, into: AtlasSheetData[]): void {
     const h = sheet.shelf.usedH;
-    const trimmed = Buffer.alloc(SHEET_W * h * 4);
-    sheet.data.copy(trimmed, 0, 0, SHEET_W * h * 4);
-    const png = toPng(SHEET_W, h, trimmed);
-    writeFileSync(join(dir, file), png);
-    into.push({ file, w: SHEET_W, h });
-    bytes += png.length;
+    into.push({ file, w: SHEET_W, h, rgba: sheet.data.slice(0, SHEET_W * h * 4) });
   }
 
   for (const sp of pack.sprites) {
@@ -184,14 +179,9 @@ export function buildAtlas(pack: RxxPack, outDir: string): AtlasResult {
     format: pack.format,
     count: pack.count,
     present: pack.sprites.length,
-    sheets,
-    maskSheets,
+    sheets: sheets.map((s) => ({ file: s.file, w: s.w, h: s.h })),
+    maskSheets: maskSheets.map((s) => ({ file: s.file, w: s.w, h: s.h })),
     sprites: entries,
   };
-  const json = `${JSON.stringify(manifest)}\n`;
-  const jsonPath = join(dir, `${pack.pack}.json`);
-  writeFileSync(jsonPath, json);
-  bytes += Buffer.byteLength(json);
-
-  return { sheets: sheets.length, maskSheets: maskSheets.length, bytes, jsonPath };
+  return { manifest, sheets, maskSheets };
 }

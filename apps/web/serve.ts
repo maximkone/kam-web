@@ -3,6 +3,9 @@
 //        docs/M0-SPIKE.md section 4). --lan binds 0.0.0.0 so other machines on the network can open the
 //        page (docs/DEPLOY.md; the relay needs the same --lan to be reachable).
 //        node apps/web/serve.ts --check         (build + route check, no listening; SERVE CHECK PASS/FAIL)
+//        node apps/web/serve.ts --export <dir> [--relay wss://host/relay]
+//                                               (publishable folder: the compiled client only, no assets;
+//                                                docs/DEPLOY.md section 4)
 //
 // The browser cannot run TypeScript, so /apps/web/<name>.js is built from apps/web/<name>.ts with
 // the local devDependency compiler (node_modules/typescript/bin/tsc, single-file emit) into
@@ -23,7 +26,7 @@
 import { createServer } from 'node:http';
 import { networkInterfaces } from 'node:os';
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync, cpSync, mkdirSync, writeFileSync } from 'node:fs';
 import { extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { scanMapFolders } from '../../packages/map/maplist.ts';
@@ -466,9 +469,66 @@ function check(): void {
   console.log(`SERVE CHECK PASS (defines=${DEFINES_DIR}, play=${PLAY_OUT}, maps=${mapList.length})`);
 }
 
+/**
+ * Write a publishable folder: the compiled client (out/web) + game.html/index.html + relay-config.js.
+ * No asset ever lands here - /defines, /maps, /mapfile, /mission and /out/atlas come from the player's own
+ * KaM Remake folder through apps/web/game/localassets.ts (docs/DEPLOY.md section 4), so the site ships only
+ * our own code and can be hosted anywhere, including a project page under a subpath.
+ */
+function exportSite(outDir: string, relayWs: string | null): void {
+  buildGraphs();
+  buildGameGraph();
+  const abs = resolve(outDir);
+  mkdirSync(abs, { recursive: true });
+  cpSync(WEB_JS_DIR, abs, { recursive: true });
+
+  const config = relayWs === null ? '' : `// The hosted relay of this deployment (apps/web/game/lobby.ts reads it).\nwindow.__KAM_RELAY_DEFAULT = ${JSON.stringify(relayWs)};\n`;
+  writeFileSync(join(abs, 'relay-config.js'), config);
+
+  const html = readFileSync(join(WEB_TS_DIR, 'game.html'), 'utf8');
+  if (!html.includes('apps/web/game/game.js')) throw new Error('game.html no longer loads apps/web/game/game.js: update exportSite');
+  const withConfig = html.replace(
+    '<script type="module" src="apps/web/play.js"></script>',
+    '<script src="relay-config.js"></script>\n<script type="module" src="apps/web/play.js"></script>',
+  );
+  writeFileSync(join(abs, 'game.html'), withConfig);
+  writeFileSync(join(abs, 'index.html'), withConfig);
+  writeFileSync(join(abs, 'README.txt'), [
+    'kam-web - the browser client only. It ships no KaM art or maps.',
+    '',
+    'Serve this folder over HTTP(S) (a static host, or "npx serve" locally) and open index.html.',
+    'Then click "Use my KaM folder" and pick the KaM Remake folder you already own: the page reads',
+    'data\\Sprites\\*.rxx, data\\defines, Maps, MapsMP and Tutorials from it, builds the atlases in your',
+    'browser and keeps them in IndexedDB. Nothing is uploaded anywhere.',
+    '',
+    relayWs === null
+      ? 'Multiplayer: relay-config.js is empty, so the panel points at a relay on the same host (ws://<host>:8130).'
+      : `Multiplayer: relay-config.js points at ${relayWs}.`,
+    'See docs/DEPLOY.md in the source repository.',
+    '',
+  ].join('\n'));
+
+  const files = readdirSync(abs, { recursive: true }) as string[];
+  let bytes = 0;
+  for (const f of files) {
+    const p = join(abs, f);
+    if (statSync(p).isFile()) bytes += statSync(p).size;
+  }
+  console.log(`export: ${files.filter((f) => statSync(join(abs, f)).isFile()).length} files, ${(bytes / 1048576).toFixed(2)} MB -> ${abs}`);
+  console.log(`export: open ${join(abs, 'index.html')} (serve it over http, not file://)`);
+}
+
 const argv = process.argv.slice(2);
 if (argv.includes('--check')) {
   check();
+} else if (argv.includes('--export')) {
+  const at = argv.indexOf('--export');
+  const dir = argv[at + 1];
+  if (dir === undefined || dir.startsWith('--')) throw new Error('missing value for --export (a folder to write)');
+  const relayAt = argv.indexOf('--relay');
+  const relay = relayAt < 0 ? null : (argv[relayAt + 1] ?? null);
+  if (relay !== null && !/^wss?:\/\//.test(relay)) throw new Error(`--relay must be a ws:// or wss:// url, got "${relay}"`);
+  exportSite(dir, relay);
 } else {
   const port = parsePort(argv);
   const host = parseHost(argv);

@@ -15,7 +15,7 @@ function chunk(type: string, data: Buffer): Buffer {
 }
 
 /** Encode `w`x`h` RGBA8 pixels (row-major, 4 bytes/px, straight alpha) as a PNG file buffer. */
-export function toPng(w: number, h: number, rgba: Buffer): Buffer {
+export function toPng(w: number, h: number, rgba: Uint8Array): Buffer {
   if (!Number.isInteger(w) || !Number.isInteger(h) || w < 1 || h < 1) {
     throw new Error(`png: bad dimensions ${w}x${h}`);
   }
@@ -26,7 +26,7 @@ export function toPng(w: number, h: number, rgba: Buffer): Buffer {
   const raw = Buffer.alloc(stride * h);
   for (let y = 0; y < h; y++) {
     // filter byte 0 (None); transparent areas stay all-zero and compress well
-    rgba.copy(raw, y * stride + 1, y * w * 4, (y + 1) * w * 4);
+    raw.set(rgba.subarray(y * w * 4, (y + 1) * w * 4), y * stride + 1);
   }
   const ihdr = Buffer.alloc(13);
   ihdr.writeUInt32BE(w, 0);

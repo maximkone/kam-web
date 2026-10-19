@@ -39,6 +39,12 @@ canvas { display: block; width: 100vw; height: 100vh; }
 .mpbtn:disabled { opacity: 0.4; cursor: not-allowed; }
 #mprooms, #mpplayers { border: 1px solid #2a323d; border-radius: 4px; background: #1b222b; padding: 6px 8px; margin-bottom: 6px; max-height: 22vh; overflow: auto; }
 #mpplayers .mprow { margin-bottom: 2px; }
+#locals { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin: 2px 0 8px; font-size: 12px; }
+#locals button { background: #2a3644; color: #cfd8e3; border: 1px solid #3a4653; border-radius: 4px; padding: 3px 8px; font: inherit; font-size: 12px; cursor: pointer; }
+#locals button:hover { background: #344556; }
+#locals button:disabled { opacity: 0.5; cursor: default; }
+#localstatus { opacity: 0.75; }
+#localstatus.bad { color: #ff9d94; opacity: 1; }
 .mpslot { background: #10151b; color: #cfd8e3; border: 1px solid #3a4653; border-radius: 4px; font: inherit; font-size: 12px; padding: 1px 3px; }
 .mpdim { opacity: 0.65; font-size: 11px; }
 #mpstatus { font-size: 12px; opacity: 0.85; margin: 4px 0 6px; min-height: 16px; }
@@ -110,6 +116,12 @@ canvas { display: block; width: 100vw; height: 100vh; }
 <div id="setup">
   <h1>KaM Skirmish</h1>
   <div class="subtitle">vs the Remake's Advanced AI · 243 maps · browser-safe sim</div>
+  <div id="locals">
+    <button id="localfolder">Use my KaM folder</button>
+    <button id="localreconnect" class="hide">Reconnect KaM folder</button>
+    <button id="localforget" class="hide">Forget</button>
+    <span id="localstatus">assets come from the server</span>
+  </div>
   <input id="filter" type="text" placeholder="filter maps..." autocomplete="off" spellcheck="false">
   <div id="maplist"></div>
   <table id="slots">
@@ -181,7 +193,7 @@ canvas { display: block; width: 100vw; height: 100vh; }
   <button id="backbtn">Back to setup</button>
 </div>
 
-<script type="module" src="/apps/web/play.js"></script>
-<script type="module" src="/apps/web/game/game.js"></script>
+<script type="module" src="apps/web/play.js"></script>
+<script type="module" src="apps/web/game/game.js"></script>
 </body>
 </html>

@@ -22,7 +22,9 @@
     "mpcheck": "node tools/uicheck/b3.ts --check",
     "serve": "node apps/web/serve.ts",
     "serve:lan": "node apps/web/serve.ts --port 8290 --lan",
-    "relay:lan": "node apps/server/relay.ts --port 8130 --lan"
+    "relay:lan": "node apps/server/relay.ts --port 8130 --lan",
+    "localcheck": "node tools/localcheck/cli.ts --check",
+    "export": "node apps/web/serve.ts --export dist"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",

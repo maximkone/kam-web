@@ -1,4 +1,6 @@
-// rxx.ts — decoder for KaM Remake sprite containers (.rxx).
+// rxx.ts — decoder for KaM Remake sprite containers (.rxx). Pure: bytes in, bytes out, no node builtins,
+// so the browser can run the same decoder (docs/DEPLOY.md section 4); the node side (readFileSync +
+// zlib.inflateSync) lives in tools/import/write.ts, the browser side injects DecompressionStream.
 //
 // Container (docs/M0-SPIKE.md section 2.1, KM_ResSprites.pas ReadRXZHeader):
 //   'RXX1' + 32 metadata bytes + zlib | 'RXX2' + u16 metadataLen + metadataLen bytes + zlib | '78 da' zlib at 0.
@@ -9,8 +11,6 @@
 //   | [i16 left,top,right,bottom if modern Units] | rgba[sizeX*sizeY*4] | u8 hasMask | u8 mask[sizeX*sizeY] if set.
 //
 // Auto-detect: try the legacy layout first, on validation failure retry modern; both failing throws.
-import { readFileSync } from 'node:fs';
-import { inflateSync } from 'node:zlib';
 
 export type RxxFormat = 'rxx0' | 'rxx1' | 'rxx2';
 
@@ -20,8 +20,8 @@ export interface RxxSprite {
   h: number;
   px: number;
   py: number;
-  rgba: Buffer;
-  mask: Buffer | null;
+  rgba: Uint8Array;
+  mask: Uint8Array | null;
 }
 
 export interface RxxPack {
@@ -40,53 +40,46 @@ interface Layout {
 
 const MAX_DIM = 4096;
 
-function bail(filePath: string, why: string): never {
-  throw new Error(`rxx: ${filePath}: ${why}`);
+function bail(what: string, why: string): never {
+  throw new Error(`rxx: ${what}: ${why}`);
 }
 
 function reason(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-function inflate(filePath: string, bytes: Buffer): Buffer {
-  try {
-    return inflateSync(bytes);
-  } catch (err) {
-    return bail(filePath, `zlib inflate failed (${reason(err)})`);
-  }
-}
-
-function readContainer(filePath: string, file: Buffer): { format: RxxFormat; payload: Buffer } {
-  if (file.length < 2) bail(filePath, 'file shorter than 2 bytes');
-  const magic = file.subarray(0, 4).toString('latin1');
+/**
+ * Where the zlib payload starts in a container, and which format it is. Pure: the caller inflates
+ * `file.subarray(headerLen)` itself (node: zlib.inflateSync, browser: DecompressionStream('deflate'),
+ * both of which read the same zlib wrapper).
+ */
+export function readRxxContainer(file: Uint8Array): { format: RxxFormat; headerLen: number } {
+  if (file.length < 2) bail('file', 'file shorter than 2 bytes');
+  const magic = String.fromCharCode(file[0]!, file[1]!, file[2]!, file[3]!);
   if (magic === 'RXX1') {
-    if (file.length < 4 + 32) bail(filePath, `RXX1 header truncated (${file.length} bytes)`);
-    return { format: 'rxx1', payload: inflate(filePath, file.subarray(4 + 32)) };
+    if (file.length < 4 + 32) bail('file', `RXX1 header truncated (${file.length} bytes)`);
+    return { format: 'rxx1', headerLen: 4 + 32 };
   }
   if (magic === 'RXX2') {
-    if (file.length < 6) bail(filePath, `RXX2 header truncated (${file.length} bytes)`);
-    const metadataLen = file.readUInt16LE(4);
+    if (file.length < 6) bail('file', `RXX2 header truncated (${file.length} bytes)`);
+    const metadataLen = file[4]! | (file[5]! << 8);
     if (file.length < 6 + metadataLen) {
-      bail(filePath, `RXX2 metadata length ${metadataLen} exceeds file size ${file.length}`);
+      bail('file', `RXX2 metadata length ${metadataLen} exceeds file size ${file.length}`);
     }
-    return { format: 'rxx2', payload: inflate(filePath, file.subarray(6 + metadataLen)) };
+    return { format: 'rxx2', headerLen: 6 + metadataLen };
   }
-  if (file[0] === 0x78 && file[1] === 0xda) {
-    return { format: 'rxx0', payload: inflate(filePath, file) };
-  }
-  bail(
-    filePath,
-    `unknown container: first bytes ${file.subarray(0, 4).toString('hex')} ` +
-      '(expected RXX1, RXX2 or a legacy zlib 78 da header)',
-  );
+  if (file[0] === 0x78 && file[1] === 0xda) return { format: 'rxx0', headerLen: 0 };
+  const head = Array.from(file.subarray(0, 4), (b) => b.toString(16).padStart(2, '0')).join(' ');
+  bail('file', `unknown container: first bytes ${head} (expected RXX1, RXX2 or a legacy zlib 78 da header)`);
 }
 
-function parsePayload(payload: Buffer, layout: Layout): { count: number; sprites: RxxSprite[] } {
+function parsePayload(payload: Uint8Array, layout: Layout): { count: number; sprites: RxxSprite[] } {
+  const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
   const bad = (why: string): never => {
     throw new Error(why);
   };
   if (payload.length < 4) bad('payload shorter than the 4-byte sprite count');
-  const count = payload.readInt32LE(0);
+  const count = view.getInt32(0, true);
   if (count < 0 || 4 + count > payload.length) {
     bad(`sprite count ${count} does not fit the ${payload.length}-byte payload`);
   }
@@ -97,13 +90,13 @@ function parsePayload(payload: Buffer, layout: Layout): { count: number; sprites
 
   const sprites: RxxSprite[] = [];
   for (let i = 0; i < count; i++) {
-    const flag = flags[i];
+    const flag = flags[i]!;
     if (flag === 0) continue;
     if (flag !== 1) bad(`flag[${i}] = ${flag}, expected 0 or 1`);
 
     if (o + 4 > payload.length) bad(`sprite ${i}: truncated before size`);
-    const w = payload.readUInt16LE(o);
-    const h = payload.readUInt16LE(o + 2);
+    const w = view.getUint16(o, true);
+    const h = view.getUint16(o + 2, true);
     o += 4;
     if (w < 1 || w > MAX_DIM || h < 1 || h > MAX_DIM) {
       bad(`sprite ${i}: size ${w}x${h} outside 1..${MAX_DIM}`);
@@ -113,8 +106,8 @@ function parsePayload(payload: Buffer, layout: Layout): { count: number; sprites
     let py: number;
     if (layout.modern) {
       if (o + 4 > payload.length) bad(`sprite ${i}: truncated before pivot`);
-      px = payload.readInt16LE(o);
-      py = payload.readInt16LE(o + 2);
+      px = view.getInt16(o, true);
+      py = view.getInt16(o + 2, true);
       o += 4;
       if (layout.unitsRect) {
         if (o + 8 > payload.length) bad(`sprite ${i}: truncated before SizeNoShadow rect`);
@@ -122,8 +115,8 @@ function parsePayload(payload: Buffer, layout: Layout): { count: number; sprites
       }
     } else {
       if (o + 8 > payload.length) bad(`sprite ${i}: truncated before pivot`);
-      px = payload.readInt32LE(o);
-      py = payload.readInt32LE(o + 4);
+      px = view.getInt32(o, true);
+      py = view.getInt32(o + 4, true);
       o += 8;
     }
 
@@ -135,11 +128,11 @@ function parsePayload(payload: Buffer, layout: Layout): { count: number; sprites
     o += pixels * 4;
 
     if (o + 1 > payload.length) bad(`sprite ${i}: missing hasMask byte`);
-    const hasMask = payload[o];
+    const hasMask = payload[o]!;
     o += 1;
     if (hasMask !== 0 && hasMask !== 1) bad(`sprite ${i}: hasMask = ${hasMask}, expected 0 or 1`);
 
-    let mask: Buffer | null = null;
+    let mask: Uint8Array | null = null;
     if (hasMask === 1) {
       if (o + pixels > payload.length) {
         bad(`sprite ${i}: mask needs ${pixels} bytes, only ${payload.length - o} left`);
@@ -160,16 +153,8 @@ function layoutName(layout: Layout): string {
   return layout.unitsRect ? 'RXX1/RXX2 modern + Units rect' : 'RXX1/RXX2 modern';
 }
 
-/** Decode one `.rxx` sprite pack; throws an Error naming the file and reason when no layout validates. */
-export function decodeRxx(filePath: string, packName: string): RxxPack {
-  let file: Buffer;
-  try {
-    file = readFileSync(filePath);
-  } catch (err) {
-    return bail(filePath, `cannot read file (${reason(err)})`);
-  }
-  const { format, payload } = readContainer(filePath, file);
-
+/** Decode one already-inflated payload (the container header stripped, the zlib stream expanded). */
+export function decodeRxxPayload(payload: Uint8Array, packName: string, format: RxxFormat = 'rxx0'): RxxPack {
   const attempts: Layout[] = [
     { modern: false, unitsRect: false },
     { modern: true, unitsRect: /^units/i.test(packName) },
@@ -183,5 +168,33 @@ export function decodeRxx(filePath: string, packName: string): RxxPack {
       problems.push(`${layoutName(layout)}: ${reason(err)}`);
     }
   }
-  return bail(filePath, `no layout validated — ${problems.join(' | ')}`);
+  return bail(packName, `no layout validated — ${problems.join(' | ')}`);
+}
+
+/**
+ * Decode one `.rxx` pack from its file bytes. `inflate` expands the zlib stream the container holds:
+ * node passes `(b) => inflateSync(b)`, the browser passes a DecompressionStream wrapper (async callers
+ * can await their own inflate first and call `decodeRxxPayload` directly). `label` only names the file
+ * in error messages.
+ */
+export function decodeRxxBytes(
+  file: Uint8Array,
+  packName: string,
+  inflate: (zlibBytes: Uint8Array) => Uint8Array,
+  label = packName,
+): RxxPack {
+  let container: { format: RxxFormat; headerLen: number };
+  try {
+    container = readRxxContainer(file);
+  } catch (err) {
+    return bail(label, reason(err).replace(/^rxx: file: /, ''));
+  }
+  let payload: Uint8Array;
+  try {
+    payload = inflate(file.subarray(container.headerLen));
+  } catch (err) {
+    return bail(label, `zlib inflate failed (${reason(err)})`);
+  }
+  const pack = decodeRxxPayload(payload, packName, container.format);
+  return pack;
 }
