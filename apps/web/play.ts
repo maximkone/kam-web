@@ -4051,18 +4051,40 @@ function installHook(): void {
 
 // ---- boot -------------------------------------------------------------------
 async function boot(): Promise<void> {
-  const [tilesetData, unitsData, housesData, treesData, guiData, tilesText, mapelemBuf, unitdatBuf, housesBuf, mapsJson] = await Promise.all([
-    fetchJson<Atlas>('/out/atlas/Tileset.json'),
-    fetchJson<Atlas>('/out/atlas/Units.json'),
-    fetchJson<Atlas>('/out/atlas/Houses.json'),
-    fetchJson<Atlas>('/out/atlas/Trees.json'),
-    fetchJson<Atlas>('/out/atlas/GUI.json'),
-    fetchText('/defines/tiles.json'),
-    fetchBytes('/defines/mapelem.dat'),
-    fetchBytes('/defines/unit.dat'),
-    fetchBytes('/defines/houses.dat'),
-    fetchJson<MapInfoView[]>('/maps'),
-  ]);
+  // The atlases, the defines and the map list are the one thing a public deployment cannot supply
+  // (docs/DEPLOY.md section 4). Without them this page has nothing to draw, so the failure is turned into
+  // an instruction in the player's language instead of the URL of a missing file.
+  let tilesetData: Atlas;
+  let unitsData: Atlas;
+  let housesData: Atlas;
+  let treesData: Atlas;
+  let guiData: Atlas;
+  let tilesText: string;
+  let mapelemBuf: Uint8Array;
+  let unitdatBuf: Uint8Array;
+  let housesBuf: Uint8Array;
+  let mapsJson: MapInfoView[];
+  try {
+    [tilesetData, unitsData, housesData, treesData, guiData, tilesText, mapelemBuf, unitdatBuf, housesBuf, mapsJson] = await Promise.all([
+      fetchJson<Atlas>('/out/atlas/Tileset.json'),
+      fetchJson<Atlas>('/out/atlas/Units.json'),
+      fetchJson<Atlas>('/out/atlas/Houses.json'),
+      fetchJson<Atlas>('/out/atlas/Trees.json'),
+      fetchJson<Atlas>('/out/atlas/GUI.json'),
+      fetchText('/defines/tiles.json'),
+      fetchBytes('/defines/mapelem.dat'),
+      fetchBytes('/defines/unit.dat'),
+      fetchBytes('/defines/houses.dat'),
+      fetchJson<MapInfoView[]>('/maps'),
+    ]);
+  } catch (err) {
+    // The console and the network tab keep the offending URL; the player needs the instruction only.
+    void err;
+    throw new Error(
+      'this deployment ships no KaM files: on the setup screen press "Use my KaM folder" or ' +
+        '"Use a KaM data pack (.zip)" and pick your own KaM Remake data, then start the match again',
+    );
+  }
 
   atlas = tilesetData;
   unitsAtlas = unitsData;

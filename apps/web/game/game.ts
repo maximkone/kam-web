@@ -94,6 +94,27 @@ function renderLocal(state: LocalState): void {
   localForgetBtn.classList.toggle('hide', state.status === 'none' || state.status === 'building');
 }
 
+/**
+ * Refuse to start a match this deployment cannot draw. A public host ships no KaM art, so without the
+ * player's own files the renderer would fail on a missing atlas somewhere inside boot: say why, on the
+ * screen that fixes it, instead (a room can start a match before the player ever touches the map list).
+ */
+function refuseStart(): void {
+  const msg =
+    'This deployment ships no KaM art. On the setup screen press "Use my KaM folder" or "Use a KaM data pack (.zip)" ' +
+    'and pick your own KaM Remake files first, then start the match again.';
+  assetsReady = false;
+  localStatusEl.textContent = msg;
+  localStatusEl.classList.add('bad');
+  const hint = document.getElementById('hint');
+  if (hint !== null) {
+    hint.textContent = msg;
+    hint.classList.remove('hide');
+  }
+  document.getElementById('setup')?.classList.remove('hide');
+  startbtn.disabled = true;
+}
+
 async function refreshMapList(): Promise<void> {
   const maps = await loadMapList();
   (window as any).__mapList = maps;
@@ -433,6 +454,10 @@ async function initAndStart(kind: string, name: string, setup: MatchSetup): Prom
  * bytes feed the renderer, the UI plays `start.yourHand`, and the loop above takes over the stepping.
  */
 async function attachMultiplayer(msk: Skirmish, files: MatchFiles, start: GameStartMsg): Promise<void> {
+  if (!assetsReady) {
+    refuseStart();
+    return;
+  }
   const hook = await waitForHook();
   if (hook === null || typeof hook.attachWorld !== 'function') {
     console.error('No renderer hook found (window.__kamplay.attachWorld)');
