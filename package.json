@@ -24,6 +24,7 @@
     "serve:lan": "node apps/web/serve.ts --port 8290 --lan",
     "relay:lan": "node apps/server/relay.ts --port 8130 --lan",
     "localcheck": "node tools/localcheck/cli.ts --check",
+    "sync:arena": "node tools/sync-arena.mjs",
     "export": "node apps/web/serve.ts --export dist"
   },
   "devDependencies": {

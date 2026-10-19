@@ -508,6 +508,14 @@ function exportSite(outDir: string, relayWs: string | null): void {
     '',
   ].join('\n'));
 
+  // A second, asset-free game (site/arena, a copy of C:\empire\games\arena) rides the same free host: the
+  // export carries it as dist/arena/. See site/arena/MIRROR.md and tools/sync-arena.mjs.
+  const arena = join(ROOT, 'site', 'arena');
+  if (existsSync(arena)) {
+    cpSync(arena, join(abs, 'arena'), { recursive: true });
+    console.log(`export: + arena -> ${join(abs, 'arena')} (no assets, ours to publish)`);
+  }
+
   const files = readdirSync(abs, { recursive: true }) as string[];
   let bytes = 0;
   for (const f of files) {

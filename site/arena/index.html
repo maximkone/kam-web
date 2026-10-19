@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>arena - a tiny RTS in a tab</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #10151b; color: #cfd8e3; font: 13px/1.4 system-ui, sans-serif; }
+  header { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; padding: 8px 12px; border-bottom: 1px solid #2a323d; }
+  header h1 { font-size: 14px; margin: 0 8px 0 0; letter-spacing: 0.04em; text-transform: uppercase; opacity: 0.9; }
+  .stat { font-variant-numeric: tabular-nums; opacity: 0.9; }
+  .stat b { color: #fff; font-weight: 600; }
+  button { background: #2a3644; color: #cfd8e3; border: 1px solid #3a4653; border-radius: 4px; padding: 3px 9px; font: inherit; cursor: pointer; }
+  button:hover { background: #344556; }
+  main { padding: 10px 12px 14px; }
+  #wrap { width: 100%; max-width: 1100px; }
+  canvas { display: block; width: 100%; border: 1px solid #2a323d; border-radius: 4px; background: #0c1014; image-rendering: pixelated; cursor: crosshair; }
+  #hint { margin-top: 6px; opacity: 0.7; }
+  #help { margin-top: 10px; max-width: 1100px; opacity: 0.75; }
+  #help b { color: #e6edf3; }
+  #end { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; background: rgba(16,21,27,0.86); text-align: center; }
+  #end.hide { display: none; }
+  .hide { display: none !important; }
+  #end h2 { margin: 0; font-size: 30px; }
+  #end p { margin: 0 0 14px; opacity: 0.8; }
+  #end button { padding: 9px 22px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>arena</h1>
+  <span class="stat">gold <b id="gold">0</b></span>
+  <span class="stat"><b id="basehp">base 400/400</b></span>
+  <span class="stat">units <b id="army">0</b></span>
+  <span class="stat">time <b id="timer">5:00</b></span>
+  <span class="stat" id="plan">bot: -</span>
+  <button id="train1">knight (30)</button>
+  <button id="train2">archer (40)</button>
+  <button id="newgame">new map</button>
+</header>
+<main>
+  <div id="wrap"><canvas id="game" width="1100" height="733"></canvas></div>
+  <div id="hint">drag to select, right-click to move or attack</div>
+  <div id="help">
+    <b>How to play:</b> your base is on the left, the bot's on the right. Gold arrives slowly on its own;
+    the four piles in the middle hold far more, and any unit standing next to one carries it home by
+    mining (both sides can mine the same pile). Knights (30) are tough and hit close, archers (40) shoot
+    from range. Destroy the enemy base, or hold more base health when the five minutes are up.
+    Keys: <b>1</b> knight, <b>2</b> archer, <b>A</b> select all, <b>S</b> stop, <b>Space</b> pause,
+    <b>V</b> watch two bots, <b>R</b> new map.
+  </div>
+</main>
+<div id="end" class="hide">
+  <h2 id="endtitle">-</h2>
+  <p id="endtext">-</p>
+  <button id="restart">play again</button>
+</div>
+<script type="module" src="src/main.js"></script>
+</body>
+</html>
