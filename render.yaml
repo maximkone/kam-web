@@ -1,0 +1,17 @@
+# render.yaml — hosted multiplayer relay, one click (docs/HOSTING.md section 2).
+#
+# Render's free web service runs apps/server/relay.ts untouched: one Node process, zero dependencies, rooms
+# in memory. Free tier sleeps after 15 minutes idle; the first player then waits ~1 minute for the cold
+# start (say that in the lobby). Upgrade to a paid instance (or use Fly.io, docs/HOSTING.md 2b) for a relay
+# that never sleeps and keeps matches ready.
+services:
+  - type: web
+    name: kam-relay
+    runtime: node
+    plan: free
+    buildCommand: ""
+    startCommand: node apps/server/relay.ts --port $PORT --host 0.0.0.0
+    healthCheckPath: /
+    envVars:
+      - key: NODE_VERSION
+        value: 24.14.0   # the relay is TypeScript run directly (Node >= 22.18 type stripping)

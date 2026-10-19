@@ -7,9 +7,10 @@
 # The site lands at https://<owner>.github.io/<repo>/ - a subpath - so the exported HTML uses relative
 # script paths (apps/web/serve.ts exportSite) and the asset routes are answered by the in-page shim.
 #
-# Multiplayer needs a relay; when one is hosted (a free Node host, docs/DEPLOY.md 4) pass it here:
-#   node apps/web/serve.ts --export dist --relay wss://<relay-host>
-# Without it relay-config.js is empty and the panel points at a relay on the visitor's own host.
+# Multiplayer needs a relay; when one is hosted (a free Node host, docs/HOSTING.md section 2) set the
+# repository variable KAM_RELAY_URL = wss://<relay host> in Settings > Secrets and variables > Actions >
+# Variables and this workflow passes it to the export. Without it relay-config.js is empty and the panel
+# points at a relay on the visitor's own host.
 name: pages
 
 on:
@@ -35,7 +36,11 @@ jobs:
         with:
           node-version: '24'
       - run: npm ci --no-audit --no-fund
-      - run: node apps/web/serve.ts --export dist
+      # KAM_RELAY_URL is a repository variable (Settings > Secrets and variables > Actions > Variables):
+      # set it to wss://<your relay host> and every visitor's Relay field is filled in (docs/HOSTING.md 2).
+      - run: node apps/web/serve.ts --export dist ${RELAY:+--relay "$RELAY"}
+        env:
+          RELAY: ${{ vars.KAM_RELAY_URL }}
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
