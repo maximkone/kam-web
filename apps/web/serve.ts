@@ -1,5 +1,7 @@
 // serve.ts — M0 dev server: static files over the repo root + /api/packs.
-// Usage: node apps/web/serve.ts [--port 8123]   (default 127.0.0.1:8123, docs/M0-SPIKE.md section 4)
+// Usage: node apps/web/serve.ts [--port 8123] [--host 127.0.0.1 | --lan]   (default 127.0.0.1:8123,
+//        docs/M0-SPIKE.md section 4). --lan binds 0.0.0.0 so other machines on the network can open the
+//        page (docs/DEPLOY.md; the relay needs the same --lan to be reachable).
 //        node apps/web/serve.ts --check         (build + route check, no listening; SERVE CHECK PASS/FAIL)
 //
 // The browser cannot run TypeScript, so /apps/web/<name>.js is built from apps/web/<name>.ts with
@@ -19,6 +21,7 @@
 // the scan result, user input is never path-joined. The viewers' own module graphs (play, mapdemo)
 // are emitted under out/web/apps/web/ and their shared browser module apps/web/mapread.js too.
 import { createServer } from 'node:http';
+import { networkInterfaces } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { extname, join, normalize, resolve, sep } from 'node:path';
@@ -96,6 +99,24 @@ const MIME: Record<string, string> = {
   '.css': 'text/css; charset=utf-8',
   '.map': 'application/octet-stream',
 };
+
+/** --lan is --host 0.0.0.0; a bare --host takes the next argument (docs/DEPLOY.md). */
+function parseHost(argv: string[]): string {
+  if (argv.includes('--lan')) return '0.0.0.0';
+  const i = argv.indexOf('--host');
+  if (i === -1) return '127.0.0.1';
+  const h = (argv[i + 1] ?? '').trim();
+  if (h === '' || h.startsWith('--')) throw new Error(`missing value for --host (an address such as 0.0.0.0 or 127.0.0.1)`);
+  return h;
+}
+
+/** The IPv4 addresses another machine on the network can use for this server (empty when loopback only). */
+function lanAddresses(): string[] {
+  return Object.values(networkInterfaces())
+    .flat()
+    .filter((n): n is NonNullable<typeof n> => n !== undefined && n.family === 'IPv4' && !n.internal)
+    .map((n) => n.address);
+}
 
 function parsePort(argv: string[]): number {
   const i = argv.indexOf('--port');
@@ -450,6 +471,7 @@ if (argv.includes('--check')) {
   check();
 } else {
   const port = parsePort(argv);
+  const host = parseHost(argv);
   // Build before listening: the first page load must not stall the server thread on tsc (see buildGameGraph).
   for (const build of [buildGraphs, buildGameGraph]) {
     try {
@@ -459,10 +481,13 @@ if (argv.includes('--check')) {
     }
   }
   server.on('error', (err) => {
-    console.error(`serve: cannot listen on 127.0.0.1:${port} (${err.message})`);
+    console.error(`serve: cannot listen on ${host}:${port} (${err.message})`);
     process.exit(1);
   });
-  server.listen(port, '127.0.0.1', () => {
+  server.listen(port, host, () => {
+    const lan = host === '0.0.0.0' || host === '::' ? lanAddresses() : [];
     console.log(`serve: http://127.0.0.1:${port}/ root=${ROOT} packs=${listPacks().join(',') || '(none)'} maps=${mapList.length}`);
+    for (const ip of lan) console.log(`serve: on the network: http://${ip}:${port}/game.html`);
+    if (lan.length > 0) console.log(`serve: relay for multiplayer: node apps/server/relay.ts --port 8130 --lan   (the lobby points at ws://<this machine>:8130 by itself)`);
   });
 }

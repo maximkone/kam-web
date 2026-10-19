@@ -3,9 +3,11 @@
 // deadline), broadcasts the merged commands once (sorted by hand, then arrival), compares the clients' CRC
 // checkpoints and stops the match on the first mismatch (game/desync).
 // Usage: node apps/server/relay.ts --port 8130 --host 127.0.0.1 [--late-ms 200] [--seed N]
+//        --lan is --host 0.0.0.0, so other machines on the network can play (docs/DEPLOY.md)
 // In-process use: startRelay({ port: 0 }) (the nettest and the relay tests).
 
 import { randomBytes, randomInt } from 'node:crypto';
+import { networkInterfaces } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { WsServer } from './ws.ts';
 import type { WsConn } from './ws.ts';
@@ -615,12 +617,17 @@ function argValue(args: string[], name: string): string | null {
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const port = Number(argValue(args, '--port') ?? 8130);
-  const host = argValue(args, '--host') ?? '127.0.0.1';
+  const host = args.includes('--lan') ? '0.0.0.0' : (argValue(args, '--host') ?? '127.0.0.1');
   const lateMs = Number(argValue(args, '--late-ms') ?? 200);
   const seedArg = argValue(args, '--seed');
   const relay = new Relay({ host, port, lateMs, seed: seedArg === null ? undefined : Number(seedArg) });
   const bound = await relay.start();
   console.log(`relay listening on ws://${host}:${bound} (late deadline ${lateMs} ms)`);
+  if (host === '0.0.0.0' || host === '::') {
+    for (const n of Object.values(networkInterfaces()).flat()) {
+      if (n !== undefined && n.family === 'IPv4' && !n.internal) console.log(`relay: on the network: ws://${n.address}:${bound}`);
+    }
+  }
   process.on('SIGINT', () => {
     relay.stop().then(() => process.exit(0));
   });

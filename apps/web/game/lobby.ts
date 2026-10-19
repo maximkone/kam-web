@@ -29,6 +29,23 @@ export const MP_PEACE_MINUTES = 0;
  */
 export const MP_AI_START = 'normal';
 
+/**
+ * Where the relay field points when it is empty. A page served from this machine uses this machine's relay
+ * (ws://127.0.0.1:8130); a page served from another machine on the network (docs/DEPLOY.md, `--lan`) uses
+ * that machine's relay on the same port, so a player on the LAN types nothing. A static deployment
+ * (GitHub Pages) has no relay of its own: set RELAY_PUBLIC to the deployed relay's ws address before the
+ * site goes live, and the https page then reaches it over wss.
+ */
+export const RELAY_PUBLIC = '';
+const RELAY_PORT = 8130;
+
+export function defaultRelayUrl(loc: { protocol: string; hostname: string } = location): string {
+  const local = loc.hostname === 'localhost' || loc.hostname === '127.0.0.1' || loc.hostname === '[::1]';
+  if (local || loc.hostname === '') return `ws://127.0.0.1:${RELAY_PORT}`;
+  if (loc.protocol === 'http:') return `ws://${loc.hostname}:${RELAY_PORT}`;
+  return RELAY_PUBLIC !== '' ? RELAY_PUBLIC : `wss://${loc.hostname}/relay`;
+}
+
 /** The lobby protocol's map id: "<folder>/<name>" (protocol.ts isMapId). */
 const MAP_ID_RE = /^[A-Za-z][A-Za-z0-9_-]*\/[A-Za-z0-9][A-Za-z0-9 _-]*$/;
 const ROOM_ID_RE = /^[A-Za-z0-9]{1,16}$/;
@@ -58,6 +75,7 @@ export function createLobby(h: LobbyHandlers): Lobby {
     return el as T;
   };
   const urlEl = q<HTMLInputElement>('relayurl');
+  if (urlEl.value.trim() === '') urlEl.value = defaultRelayUrl();
   const nameEl = q<HTMLInputElement>('mpname');
   const handsEl = q<HTMLSelectElement>('mphands');
   const hostEl = q<HTMLButtonElement>('mphost');
